@@ -346,9 +346,11 @@ fn kite_exe() -> String {
 
 async fn up(paths: &paths::Paths, config: kite_proto::Config, no_supervise: bool) -> anyhow::Result<()> {
     let config = Arc::new(config);
+    // Claim the socket before touching the ledger: a second `kite up` on a live
+    // project must fail without writing anything.
+    let listener = server::bind(&paths.socket).await?;
     let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync)?;
     let (handle, mut broker) = Broker::spawn(config.clone(), ledger);
-    let listener = server::bind(&paths.socket).await?;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(server::serve(listener, paths.socket.clone(), handle.clone(), async {
         let _ = stop_rx.await;

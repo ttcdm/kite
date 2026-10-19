@@ -102,11 +102,26 @@ pub fn read_events(path: &Path) -> io::Result<Vec<Value>> {
 impl Ledger {
     /// Opens (or creates) the ledger and continues its chain. Refuses to start
     /// on a ledger whose chain does not verify.
+    ///
+    /// The file stays exclusively locked while the ledger is open, so a second
+    /// broker on the same project fails here instead of interleaving records
+    /// with the first and breaking the chain.
     pub fn open(path: &Path, fsync: Fsync) -> io::Result<Ledger> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let (n, prev) = if path.exists() {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("{} is in use by another kite broker", path.display()),
+                ));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+        let (n, prev) = if std::fs::metadata(path)?.len() > 0 {
             let r = verify(path).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -117,7 +132,6 @@ impl Ledger {
         } else {
             (0, GENESIS.to_string())
         };
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
         let (tx, rx) = mpsc::channel(QUEUE);
         let thread =
             std::thread::Builder::new().name("kite-ledger".into()).spawn(move || writer(file, rx, n, prev, fsync))?;
@@ -211,6 +225,20 @@ mod tests {
         l.flush().await.unwrap();
         l.close().unwrap();
         assert_eq!(verify(&p).unwrap().records, 3);
+    }
+
+    #[tokio::test]
+    async fn a_second_writer_is_refused_while_the_first_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("l.jsonl");
+        let first = Ledger::open(&p, Fsync::Batch).unwrap();
+        let second = Ledger::open(&p, Fsync::Batch).err().expect("the ledger is locked");
+        assert_eq!(second.kind(), io::ErrorKind::AddrInUse);
+        first.append(json!({"type": "a"})).await.unwrap();
+        first.close().unwrap();
+        // Closing releases the lock.
+        Ledger::open(&p, Fsync::Batch).unwrap().close().unwrap();
+        assert_eq!(verify(&p).unwrap().records, 1);
     }
 
     #[tokio::test]
