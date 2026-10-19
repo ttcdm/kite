@@ -309,6 +309,17 @@ mod tests {
     }
 
     #[test]
+    fn schemas_cannot_reach_the_network_or_other_files() {
+        // jsonschema is built without its http and file resolvers, so a remote or file
+        // $ref fails at load instead of being fetched.
+        for target in ["https://example.com/s.json", "file:///etc/passwd"] {
+            let mut r = Registry::with_builtins();
+            let e = r.insert("t.ev@1".parse().unwrap(), ContractKind::Event, None, None, json!({"$ref": target}));
+            assert!(e.is_err(), "{target} should not resolve");
+        }
+    }
+
+    #[test]
     fn kite_names_are_reserved() {
         let mut r = Registry::with_builtins();
         let e = r.insert("kite.x@1".parse().unwrap(), ContractKind::Event, None, None, json!({}));
