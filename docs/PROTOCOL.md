@@ -35,6 +35,14 @@ Frames longer than 1 MiB are refused and the connection closed.
 `evidence {id, kind, reference, note?, gate?, pass?}`, and the read-only `get {id}` and
 `list {state?, owner?}`, which work without registering.
 
+When the project root is inside a git work tree, two moves also act on git (README.md, Agent
+Kanban). `move {to: "running"}` adds the card's worktree on its branch, or creates the branch
+when the card has no worktree; if git fails the answer is `transition_refused` with git's
+message, and `detail.git` holds that message alone. `move {to: "merged"}` is `transition_refused`
+unless `merge_ref` resolves to a commit reachable from `[board] mainline` (default `"main"`);
+when it is not reachable, `detail` is `{commit, mainline}`. The merged card's `merge_ref` is the
+full commit id, not the ref that was sent.
+
 A `draft` is `{to, schema, payload, kind?, timeout_ms?, blocking?, id?}`. `kind` is taken from the
 schema when omitted. `timeout_ms` and `blocking` apply to requests only. `id` is an optional
 idempotency key: resending a draft with the same id returns the first send's answer with

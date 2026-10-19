@@ -55,11 +55,13 @@ description = "Reviews finished work and approves it or says what to fix."
 # max_restarts = 3
 
 # Agent Kanban: who may shape, assign, merge and archive cards, and what a card
-# must pass before it merges. See `kite board`.
+# must pass before it merges. See `kite board`. In a git project, starting a card
+# adds its worktree on its branch, and merge_ref must be a commit on `mainline`.
 [board]
 managers = ["lead"]
 default_gates = ["tests", "diff_review", "risk"]
 independent_review = true
+mainline = "main"
 
 [[routes]]
 from = "lead"

@@ -69,9 +69,9 @@ gates. The broker refuses any move whose exit criteria are not met and says whic
 | Move | Exit criteria |
 |---|---|
 | backlog → ready | acceptance criteria, a merge gate and at least one gate; by a manager |
-| ready → running | an owner and a branch or worktree; only the owner starts it; no other active card may use the same worktree |
+| ready → running | an owner and a branch or worktree; only the owner starts it; no other active card may use the same worktree. In a git project the broker then adds the worktree on the card's branch (`git worktree add`, creating the branch from HEAD if it does not exist, or checking it out in a worktree already there), or creates the branch if the card has no worktree; a worktree needs a branch, and a git error refuses the move with git's message |
 | running → review | the handoff file (path relative to the worktree) exists and evidence was recorded for this revision; by the owner |
-| review → merged | every gate passed in order in this revision, at least one passed by someone other than the owner (`independent_review`), and a `merge_ref`; by a manager |
+| review → merged | every gate passed in order in this revision, at least one passed by someone other than the owner (`independent_review`), and a `merge_ref`; in a git project `merge_ref` must name a commit reachable from `mainline`, and the card keeps the full commit id; by a manager |
 | review → running | starts a new revision; earlier gate results no longer count |
 | any → blocked | a blocker with reason, owner and next action; it can only return to the column it left |
 | any → archived | a reason; by a manager |
@@ -81,6 +81,7 @@ gates. The broker refuses any move whose exit criteria are not met and says whic
 managers = ["lead"]                        # empty: every agent may manage
 default_gates = ["tests", "diff_review", "risk"]
 independent_review = true
+mainline = "main"                          # merge_ref must be on this ref (git projects only)
 ```
 
 Card changes are written to the ledger as full snapshots, and `kite up` rebuilds the board
@@ -98,8 +99,13 @@ every card in review. `--all` lists merged and archived cards; `--watch` redraws
 `kite card new|show|set|move|evidence` changes cards from a shell; agents use `kite_board`,
 `kite_card_create`, `kite_card_update`, `kite_card_move` and `kite_card_evidence`.
 
-The broker checks that the handoff file exists. It does not check that a branch exists, that
-a worktree is a git worktree, or that `merge_ref` names a real commit.
+A git project is one whose root (the directory holding `kite.toml`) is inside a git work tree.
+There the broker creates branches and worktrees when cards start and checks `merge_ref` against
+`mainline` when they merge. In any other project it checks only that the handoff file exists, and
+`merge_ref` is kept as written (a PR link is fine). The broker does not check that the commit
+in `merge_ref` contains the card's branch, does not remove worktrees when a card merges or is
+archived, and does not re-check the branch when a card is reopened or unblocked. Git runs on
+the broker task, so a slow checkout holds up other messages until it finishes.
 
 ## Seeing what each agent is doing
 
