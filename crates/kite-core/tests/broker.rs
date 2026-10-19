@@ -88,13 +88,9 @@ impl Env {
     async fn stop_keep(self) -> (TempDir, Vec<Value>) {
         self.h.shutdown().await;
         self.task.await.unwrap().unwrap();
-        let path = self.dir.path().join(".kite/ledger.jsonl");
+        let path = self.dir.path().join(".kite/ledger");
         ledger::verify(&path).unwrap();
-        let events = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str::<Value>(l).unwrap()["event"].clone())
-            .collect();
+        let events = ledger::read_all_events(&path).unwrap();
         (self.dir, events)
     }
 }
@@ -727,7 +723,7 @@ async fn a_torn_ledger_tail_is_repaired_and_recorded_on_the_next_start() {
     e.h.call(lead, send(draft("worker", "note@1", json!({"n": 1})))).await.result.unwrap();
     let (dir, _) = e.stop_keep().await;
     // A crash halfway through writing the next record.
-    let path = dir.path().join(".kite/ledger.jsonl");
+    let path = dir.path().join(".kite/ledger/000001.jsonl");
     let torn: &[u8] = b"{\"n\":99,\"ts_ms\":1,\"prev\":\"de";
     let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
     std::io::Write::write_all(&mut f, torn).unwrap();

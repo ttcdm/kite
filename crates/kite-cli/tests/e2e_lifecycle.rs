@@ -185,3 +185,32 @@ async fn agents_left_by_a_killed_kite_up_are_reported_on_the_next_start() {
     let trace = p.ok(&["trace"]);
     assert!(trace.contains("stale_agent_group"), "{trace}");
 }
+
+#[tokio::test]
+async fn work_survives_restarts_that_compact_the_ledger() {
+    let mut p = Project::init("compaction_restart");
+    // Every start finds the live segment too big and compacts it.
+    p.edit_config(|c| c.replacen("[broker]\n", "[broker]\nsegment_bytes = 1\n", 1));
+    p.up().await;
+    let task = ["send", "--as", "lead", "--to", "coder", "--schema", "task.assign@1", "--payload", r#"{"goal":"g"}"#];
+    let rid = p.json(&task)["id"].as_str().unwrap().to_string();
+    let card = p.json(&["card", "new", "--as", "lead", "--title", "Keep me", "--accept", "survives"]);
+    let card_id = card["id"].as_str().unwrap().to_string();
+    p.stop().await;
+    p.up().await;
+    p.stop().await;
+    p.up().await;
+
+    let got = p.json(&["recv", "--as", "coder"]);
+    // Counted once the broker has answered: the socket appears before the ledger is opened.
+    let segments = std::fs::read_dir(p.path(".kite/ledger"))
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "jsonl"));
+    assert_eq!(segments.count(), 3, "each restart started a new segment");
+    assert_eq!(got["messages"][0]["id"], rid.as_str(), "the queued request came through two compactions");
+    assert_eq!(p.json(&["card", "show", &card_id])["title"], "Keep me");
+    p.ok(&["respond", "--as", "coder", "--request", &rid, "--result", r#"{"summary":"ok","files_changed":[]}"#]);
+    p.stop().await;
+    assert_eq!(p.json(&["trace", "--verify"])["ok"], true, "one chain across all segments");
+    assert!(p.ok(&["trace"]).contains("snapshot"));
+}

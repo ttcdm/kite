@@ -35,7 +35,7 @@ async fn an_agent_cannot_act_as_another_without_its_token() {
     lead.close().await;
 
     p.stop().await;
-    let ledger = std::fs::read_to_string(p.path(".kite/ledger.jsonl")).unwrap();
+    let ledger = p.ok(&["trace", "--json"]);
     let lead_token = std::fs::read_to_string(p.token_file("lead")).unwrap();
     assert!(!ledger.contains(lead_token.trim()), "a token was written to the ledger");
 }

@@ -92,14 +92,31 @@ stay until the request closes, so a reconnecting agent cannot dodge deadlock det
 
 ## Ledger
 
-`.kite/ledger.jsonl` holds one record per line:
-`{"n", "ts_ms", "prev", "event", "hash"}`, where `hash = sha256(prev + "\n" + json({event, n, ts_ms}))`
-and the first `prev` is 64 zeros. Event types: `started`, `restored`, `stopped`, `registered`,
+The ledger is the directory `.kite/ledger/` (`[broker] ledger`) of segment files
+`000001.jsonl`, `000002.jsonl`, …, one record per line:
+`{"n", "ts_ms", "prev", "event", "hash"}`, where `hash = sha256(prev + "\n" + json({event, n, ts_ms}))`.
+One chain runs through every segment: the first record of a segment continues `n` and `prev` from
+the last record of the one before, and the very first `prev` is 64 zeros. A Kite 0.1 ledger file
+(`.kite/ledger.jsonl`) is moved in as `000001.jsonl` on first start; an older kite would then see
+an empty ledger.
+
+When `kite up` finds the live segment larger than `[broker] segment_bytes` (default 64 MiB), it
+starts the next segment with one `snapshot` record, `{format, state}`, whose `state` is the replay
+state at that point (queued messages, open requests, the closed and sent windows, clocks, cards).
+It is written to a temporary file, synced and renamed, so a segment always starts complete, and
+it is taken just before `started`, when nothing is in flight, so the snapshot plus the later
+events restore exactly what the whole history would. A start reads only the live segment and
+checks its link to the segment before it; `kite trace --verify` checks every segment. Deleting
+the oldest segments by hand is allowed: verification then starts at the oldest one present.
+`started` and `snapshot` carry `format` (2); `kite up` refuses a ledger with a newer one.
+
+Event types: `started`, `restored`, `stopped`, `registered`,
 `disconnected`, `accepted` (`{envelope}`, plus `blocking: true` for a blocking request), `refused`, `delivered`, `acked`, `closed`, `withdrawn`, `duplicate`,
 `deadlock_prevented`, `dead_lettered`, `lease_granted`, `lease_denied`, `lease_released`,
 `lease_expired`, `process`, `note`, and `card` (`{action, by, card}` with the full card after the
 change; the board is rebuilt from the last snapshot of each card), and `recovered`
-(`{bytes_dropped}`, see below). `kite up` refuses to start on a ledger whose chain does not verify.
+(`{bytes_dropped}`, see below), and `snapshot` (above). `kite up` refuses to start on a live segment
+whose chain does not verify.
 
 A crash in the middle of writing a record can leave the last line incomplete. On open, a final
 line without a newline is repaired before verification: if it is a complete record its newline is

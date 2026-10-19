@@ -68,6 +68,18 @@ a no-op. `Git` runs each command in its own process group with a deadline (`[boa
 git_timeout_ms`, default 30 s) and kills the group, hooks included, when it passes. Whether the
 project is a git repository is checked once at start.
 
+## The ledger is compacted at startup
+
+The ledger is a directory of segments sharing one hash chain. `Ledger::open` reads only the live
+segment: it repairs a torn final record, verifies the chain and its link to the previous
+segment, and replays it through `restore::Fold` (from its leading `snapshot`, if any). If the
+segment is larger than `segment_bytes`, it writes the replay state as a `snapshot` record that
+starts the next segment, through a temporary file that is synced and renamed. Compaction happens
+only at startup, just before `started`, when the requeue that `started` would cause has already
+been applied, so a snapshot plus the later events equals the whole history; a test checks this
+at every cut point of a recorded two-run history. Nothing compacts while the broker runs, so a
+single long run grows one segment until the next start.
+
 ## Messages are event-sourced too
 
 Mailboxes and open requests are rebuilt from the ledger the same way (`restore.rs`). Replaying

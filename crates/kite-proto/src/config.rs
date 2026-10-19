@@ -51,6 +51,10 @@ pub struct BrokerSettings {
     /// Connections the broker accepts at once; more are refused with `busy`.
     #[serde(default = "d_max_connections")]
     pub max_connections: usize,
+    /// When `kite up` finds the live ledger segment larger than this, it starts the
+    /// next segment with a snapshot, so starts stay fast however long the history.
+    #[serde(default = "d_segment_bytes")]
+    pub segment_bytes: u64,
     /// Agents must present their token (`.kite/tokens/<agent>`) to register.
     #[serde(default = "d_true")]
     pub require_tokens: bool,
@@ -75,7 +79,10 @@ fn d_socket() -> PathBuf {
     PathBuf::from(".kite/kite.sock")
 }
 fn d_ledger() -> PathBuf {
-    PathBuf::from(".kite/ledger.jsonl")
+    PathBuf::from(".kite/ledger")
+}
+fn d_segment_bytes() -> u64 {
+    64 << 20
 }
 fn d_max_connections() -> usize {
     256
@@ -93,6 +100,7 @@ impl Default for BrokerSettings {
             socket: d_socket(),
             ledger: d_ledger(),
             max_connections: d_max_connections(),
+            segment_bytes: d_segment_bytes(),
             require_tokens: true,
         }
     }

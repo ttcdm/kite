@@ -240,10 +240,13 @@ impl Project {
             let _ = std::fs::write(out.join("status.json"), self.kite(&["--json", "status"]).stdout);
             let _ = std::fs::write(out.join("board.txt"), self.kite(&["board", "--all"]).stdout);
         }
-        for (from, to) in
-            [(".kite/up.log", "up.log"), (".kite/ledger.jsonl", "ledger.jsonl"), ("kite.toml", "kite.toml")]
-        {
+        for (from, to) in [(".kite/up.log", "up.log"), ("kite.toml", "kite.toml")] {
             let _ = std::fs::copy(self.path(from), out.join(to));
+        }
+        if let Ok(segments) = std::fs::read_dir(self.path(".kite/ledger")) {
+            for s in segments.flatten() {
+                let _ = std::fs::copy(s.path(), out.join(format!("ledger-{}", s.file_name().to_string_lossy())));
+            }
         }
         let _ = std::fs::write(out.join("trace.txt"), self.kite(&["trace"]).stdout);
         if let Ok(logs) = std::fs::read_dir(self.path(".kite/logs")) {

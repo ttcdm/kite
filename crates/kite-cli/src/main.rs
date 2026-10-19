@@ -391,7 +391,7 @@ async fn up(paths: &paths::Paths, config: kite_proto::Config, no_supervise: bool
     // Claim the socket before touching the ledger: a second `kite up` on a live
     // project must fail without writing anything.
     let listener = server::bind(&paths.socket).await?;
-    let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync)?;
+    let ledger = Ledger::open_with(&config.broker.ledger, config.broker.fsync, config.broker.segment_bytes)?;
     let (handle, mut broker) = Broker::spawn(config.clone(), ledger);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let limits = server::Limits { max_connections: config.broker.max_connections, ..Default::default() };
@@ -470,14 +470,13 @@ fn trace(config: &kite_proto::Config, agent: Option<&str>, verify: bool, json_mo
         print(json_mode, &v, || format!("ledger ok: {} records, chain intact, head {}\n", r.records, r.last_hash));
         return Ok(());
     }
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let rec: Value = serde_json::from_str(line)?;
+    let records = ledger::read_all_records(path).with_context(|| format!("reading {}", path.display()))?;
+    for rec in records {
         if agent.is_some_and(|a| !show::mentions(&rec["event"], a)) {
             continue;
         }
         if json_mode {
-            println!("{line}");
+            println!("{rec}");
         } else {
             println!("{}", show::trace_line(&rec));
         }

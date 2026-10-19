@@ -219,7 +219,8 @@ edit and prints a warning. This hook is Claude Code specific; other hosts rely o
 | `max_connections` | 256 | connections open at once; more are refused with `busy` |
 | `fsync` | `"batch"` | `"always"` syncs the ledger after every record |
 | `require_tokens` | `true` | agents must present their token to register |
-| `socket` / `ledger` | `.kite/kite.sock` / `.kite/ledger.jsonl` | paths, relative to `kite.toml` |
+| `socket` / `ledger` | `.kite/kite.sock` / `.kite/ledger` | the socket, and the ledger's segment directory, relative to `kite.toml` |
+| `segment_bytes` | 67108864 (64 MiB) | a start that finds the live ledger segment larger than this begins a new one with a snapshot |
 
 The socket's directory is kept private: `kite up` restricts it to its owner (0700) and refuses a
 directory that belongs to another user. A connection that has not tried to register is closed
@@ -258,7 +259,8 @@ throwaway setups. What tokens do and do not protect against is in [SECURITY.md](
   restart loses neither queued messages nor open requests. Messages handed out but not
   acknowledged come back with `redelivered` incremented, as after a disconnect, and a deadline
   that passed while the broker was down answers `timeout` right after start. Leases do not
-  survive a restart. Every start reads the whole ledger; nothing compacts it.
+  survive a restart. A start reads only the live ledger segment: when it has grown past
+  `segment_bytes`, the start compacts it into a snapshot that begins a new segment.
 - Tokens keep agents from acting as each other by passing a name. They are files your user can
   read, so they are not a defence against a process running as you that reads them on purpose
   (see [SECURITY.md](SECURITY.md)).

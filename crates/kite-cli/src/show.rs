@@ -295,6 +295,16 @@ pub fn trace_line(rec: &Value) -> String {
             format!("{} {}", s(&e["agent"]), s(&e["resource"]))
         }
         "registered" | "disconnected" => s(&e["agent"]).to_string(),
+        "snapshot" => {
+            let st = &e["state"];
+            let count = |v: &Value| v.as_object().map_or(0, |m| m.len());
+            format!(
+                "everything before, compacted: {} mailboxes, {} open requests, {} cards",
+                count(&st["slots"]),
+                count(&st["open"]),
+                count(&st["cards"])
+            )
+        }
         _ => {
             let mut rest = e.clone();
             if let Value::Object(m) = &mut rest {

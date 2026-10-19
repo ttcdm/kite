@@ -317,15 +317,14 @@ impl Broker {
     /// Like `spawn`, with the version control the board uses (tests pass a fake).
     pub fn spawn_with_vcs(
         config: Arc<Config>,
-        ledger: Ledger,
+        mut ledger: Ledger,
         vcs: Arc<dyn Vcs>,
     ) -> (BrokerHandle, JoinHandle<io::Result<()>>) {
         let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
         let (git_tx, git_rx) = mpsc::unbounded_channel();
         let slots = config.agents.keys().map(|a| (a.clone(), Slot::default())).collect();
-        // Messages, open requests and the board are rebuilt from the ledger.
-        let events = crate::ledger::read_events(ledger.path()).unwrap_or_default();
-        let restored = crate::restore::replay(&events);
+        // Messages, open requests and the board come back from the ledger.
+        let restored = ledger.take_history();
         let cards = restored.cards.clone();
         let board =
             Board::new(config.board.clone(), config.agents.keys().cloned().collect(), config.root.clone(), cards);
@@ -364,6 +363,7 @@ impl Broker {
         self.board.set_repo(is_repo);
         self.log(json!({
             "type": "started",
+            "format": crate::ledger::FORMAT,
             "protocol": PROTOCOL,
             "agents": self.slots.keys().collect::<Vec<_>>(),
             "schemas": self.config.registry.contracts().map(|c| c.schema_ref.to_string()).collect::<Vec<_>>(),
