@@ -620,15 +620,25 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("KITE_LOG").unwrap_or_else(|_| "warn".into()))
         .init();
     let cli = Cli::parse();
     let json_mode = cli.json;
-    match run(cli).await {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: cannot start the async runtime: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let result = runtime.block_on(run(cli));
+    // A blocking task that is stuck (a hung git, say) must not keep the process alive.
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    match result {
         Ok(code) => code,
         Err(e) => {
             match e.downcast_ref::<KiteError>() {

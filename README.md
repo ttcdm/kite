@@ -220,6 +220,11 @@ The socket's directory is kept private: `kite up` restricts it to its owner (070
 directory that belongs to another user. A connection that has not tried to register is closed
 after 60 seconds without a frame.
 
+**Logs.** `kite up` logs to stderr. `KITE_LOG` sets the level (default `warn`: supervisor
+restarts, leftover agents, a repaired ledger, an over-open socket directory); `KITE_LOG=info` adds
+registrations, disconnects and refusals. Colors are used only on a terminal. The ledger, not the
+log, is the audit record.
+
 **Durability.** A reply means the broker accepted the operation and queued its ledger record.
 With `fsync = "batch"` the ledger is synced whenever its queue empties, so a power cut can lose
 the last moments of activity; with `fsync = "always"` every record is synced before the next is

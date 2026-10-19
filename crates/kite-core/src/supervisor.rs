@@ -207,6 +207,7 @@ async fn supervise(job: Job, mut stop: watch::Receiver<bool>) {
             return;
         }
         restarts += 1;
+        tracing::warn!(agent = job.agent, restarts, last_exit, "agent exited; restarting");
         report(&job, ProcessState::Restarting, None, restarts, last_exit).await;
         let backoff =
             Duration::from_millis(250u64.saturating_mul(1 << (restarts - 1).min(6))).min(Duration::from_secs(10));

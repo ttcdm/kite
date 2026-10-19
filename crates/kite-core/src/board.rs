@@ -421,7 +421,7 @@ impl Board {
                         (None, Some(b)) => {
                             vcs.ensure_branch(b).map_err(|e| git(format!("cannot create branch {b}"), e))?
                         }
-                        (None, None) => unreachable!("checked above"),
+                        (None, None) => return Err(not_met("set a branch or worktree first".into())),
                     }
                 }
                 notify.extend(self.managers_except(by));

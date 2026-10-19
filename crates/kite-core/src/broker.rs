@@ -240,6 +240,12 @@ fn to_value<T: serde::Serialize>(v: &T) -> Value {
     serde_json::to_value(v).expect("wire types serialize")
 }
 
+/// A registered agent always has a slot (slots come from kite.toml and never
+/// change while the broker runs); this answers instead of panicking if not.
+fn no_slot(agent: &str) -> KiteError {
+    KiteError::new(ErrorCode::Internal, format!("no mailbox for {agent}"))
+}
+
 fn is_answer_to(e: &Envelope, rid: Ulid) -> bool {
     e.correlation_id == Some(rid) && matches!(e.kind, Kind::Response | Kind::Error)
 }
@@ -361,6 +367,7 @@ impl Broker {
                 let _ = w.reply.send(shutting_down());
             }
         }
+        tracing::info!(lc = self.lc, open_requests = self.open.len(), "broker stopped");
         self.log(json!({ "type": "stopped", "lc": self.lc, "open_requests": self.open.len() }));
         self.flush_log().await?;
         self.ledger.flush().await?;
@@ -512,6 +519,7 @@ impl Broker {
         if let Err(e) = &result
             && !read_only
         {
+            tracing::info!(agent = agent.as_deref().unwrap_or("-"), op = name, code = %e.code, "refused");
             self.log(json!({
                 "type": "refused", "conn": conn, "agent": agent, "op": name,
                 "code": e.code, "message": e.message,
@@ -527,7 +535,7 @@ impl Broker {
         match op {
             Op::Send { draft } => Some(self.send(me, draft)),
             Op::Recv { wait_ms, max } => self.recv(me, wait_ms, max, reply),
-            Op::Ack { ids } => Some(Ok(self.ack(me, &ids))),
+            Op::Ack { ids } => Some(self.ack(me, &ids)),
             Op::Await { request_id, wait_ms } => self.await_answer(me, request_id, wait_ms, reply),
             Op::Respond { request_id, result, error } => Some(self.respond(me, request_id, result, error)),
             Op::Cancel { request_id } => Some(self.cancel(me, request_id)),
@@ -562,6 +570,7 @@ impl Broker {
         slot.conn = Some(conn);
         let inbox = slot.mailbox.len();
         self.conns.insert(conn, Some(agent.to_string()));
+        tracing::info!(agent, conn, "registered");
         self.log(json!({ "type": "registered", "agent": agent, "conn": conn }));
         Ok(to_value(&RegisterOk { agent: agent.to_string(), protocol: PROTOCOL.to_string(), inbox }))
     }
@@ -599,7 +608,7 @@ impl Broker {
                 .with_detail(json!({ "allowed": allowed })));
         }
         if let Some(id) = d.id {
-            if let Some(prev) = self.slots[me].sent.get(&id) {
+            if let Some(prev) = self.slots.get(me).and_then(|s| s.sent.get(&id)) {
                 let mut dup = prev.clone();
                 dup.duplicate = true;
                 self.log(json!({ "type": "duplicate", "agent": me, "id": id }));
@@ -682,7 +691,7 @@ impl Broker {
             ));
         }
         let generation = self.next_generation();
-        let slot = self.slots.get_mut(me).expect("registered agents have slots");
+        let Some(slot) = self.slots.get_mut(me) else { return Some(Err(no_slot(me))) };
         if slot.recv.is_some() {
             return Some(err(ErrorCode::WaitInProgress, "a recv is already waiting for this agent"));
         }
@@ -705,15 +714,15 @@ impl Broker {
         None
     }
 
-    fn ack(&mut self, me: &str, ids: &[Ulid]) -> Value {
-        let slot = self.slots.get_mut(me).expect("registered agents have slots");
+    fn ack(&mut self, me: &str, ids: &[Ulid]) -> KiteResult<Value> {
+        let Some(slot) = self.slots.get_mut(me) else { return Err(no_slot(me)) };
         let held: BTreeSet<Ulid> = slot.in_flight.iter().map(|e| e.id).collect();
         slot.in_flight.retain(|e| !ids.contains(&e.id));
         let (acked, unknown): (Vec<Ulid>, Vec<Ulid>) = ids.iter().partition(|id| held.contains(id));
         if !acked.is_empty() {
             self.log(json!({ "type": "acked", "agent": me, "ids": acked }));
         }
-        json!({ "acked": acked.len(), "unknown": unknown })
+        Ok(json!({ "acked": acked.len(), "unknown": unknown }))
     }
 
     fn no_such_request(&self, rid: Ulid) -> KiteError {
@@ -735,7 +744,7 @@ impl Broker {
             return Some(err(ErrorCode::InvalidArgument, format!("wait_ms must be 0..={MAX_WAIT_MS}")));
         }
         let generation = self.next_generation();
-        let slot = self.slots.get_mut(me).expect("registered agents have slots");
+        let Some(slot) = self.slots.get_mut(me) else { return Some(Err(no_slot(me))) };
         let found = match slot.mailbox.iter().position(|e| is_answer_to(e, rid)) {
             Some(pos) => slot.mailbox.remove(pos),
             None => slot.in_flight.iter().position(|e| is_answer_to(e, rid)).map(|pos| slot.in_flight.remove(pos)),
@@ -1078,6 +1087,7 @@ impl Broker {
         for r in &held {
             self.leases.remove(r);
         }
+        tracing::info!(agent, conn, requeued = requeued.len(), "disconnected");
         self.log(json!({
             "type": "disconnected", "agent": agent, "conn": conn,
             "requeued": requeued, "leases_released": held,
