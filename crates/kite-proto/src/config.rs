@@ -217,14 +217,12 @@ pub struct Config {
 /// The name the broker uses as `from` on messages it originates.
 pub const BROKER_AGENT: &str = "kite";
 
+/// Agent names follow the gate-name rule, and `kite` is reserved for the broker.
 pub fn valid_agent_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
-        && name.len() <= 64
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-        && name != BROKER_AGENT
+    valid_gate_name(name) && name != BROKER_AGENT
 }
 
+/// `[a-z][a-z0-9_-]{0,63}`.
 pub fn valid_gate_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
