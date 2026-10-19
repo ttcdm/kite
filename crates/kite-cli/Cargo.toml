@@ -1,13 +1,19 @@
 [package]
 name = "kite-cli"
-version = "0.1.0"
-edition = "2024"
+description = "The kite command: run the broker, serve agents over MCP, and drive it from a shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
-kite-core = { version = "0.1.0", path = "../kite-core" }
-kite-proto = { version = "0.1.0", path = "../kite-proto" }
+kite-core = { version = "0.2.0", path = "../kite-core" }
+kite-proto = { version = "0.2.0", path = "../kite-proto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.53.3", features = ["full"] }

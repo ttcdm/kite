@@ -18,8 +18,11 @@ deadline.
 
 ## Quick start
 
+Kite runs on macOS and Linux. Download a release archive (each has a `.sha256` beside it) and put
+`kite` on your `PATH`, or build it with Rust 1.89 or later:
+
 ```bash
-cargo install --path crates/kite-cli
+cargo install --locked --path crates/kite-cli
 ```
 
 ```bash
@@ -230,6 +233,35 @@ after 60 seconds without a frame.
 restarts, leftover agents, a repaired ledger, an over-open socket directory); `KITE_LOG=info` adds
 registrations, disconnects and refusals. Colors are used only on a terminal. The ledger, not the
 log, is the audit record.
+
+**Running it as a service.** `kite up` stays in the foreground, logs to stderr and stops cleanly
+on SIGTERM, which is what launchd and systemd expect. A systemd user unit:
+
+```ini
+[Unit]
+Description=Kite broker for ~/work/project
+
+[Service]
+WorkingDirectory=%h/work/project
+ExecStart=%h/.cargo/bin/kite up
+Restart=on-failure
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
+```
+
+On macOS, a LaunchAgent with `ProgramArguments` set to `kite` `up`, `WorkingDirectory` set to
+the project and `KeepAlive` set to `SuccessfulExit = false` does the same.
+
+**Backups.** Everything Kite keeps is under `.kite/`: the ledger segments (copy any closed
+segment at any time; copy the live one while `kite up` is stopped), the tokens and the logs.
+`kite trace --verify` checks a restored ledger. `.kite/` holds the tokens and the whole message
+history, so keep backups private.
+
+**Upgrading.** Stop `kite up`, install the new `kite`, start it again. Read CHANGELOG.md first:
+before 1.0 a minor release can change the protocol or the ledger, and `kite up` refuses a ledger
+from a newer format rather than misreading it.
 
 **Durability.** A reply means the broker accepted the operation and queued its ledger record.
 With `fsync = "batch"` the ledger is synced whenever its queue empties, so a power cut can lose

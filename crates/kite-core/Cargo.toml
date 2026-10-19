@@ -1,11 +1,17 @@
 [package]
 name = "kite-core"
-version = "0.1.0"
-edition = "2024"
+description = "Kite's broker, hash-chained ledger, agent board, supervisor and client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 hex = "0.4.3"
-kite-proto = { version = "0.1.0", path = "../kite-proto" }
+kite-proto = { version = "0.2.0", path = "../kite-proto" }
 libc = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

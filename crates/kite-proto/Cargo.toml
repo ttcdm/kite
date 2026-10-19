@@ -1,7 +1,13 @@
 [package]
 name = "kite-proto"
-version = "0.1.0"
-edition = "2024"
+description = "Kite's message contracts: envelopes, schemas, kite.toml and the wire protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [dependencies]
 jsonschema = { version = "0.59.0", default-features = false, features = ["idna"] }

@@ -1,3 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/kite-proto", "crates/kite-core", "crates/kite-cli"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+# File::try_lock (the ledger lock) is stable since Rust 1.89.
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+keywords = ["agents", "orchestration", "mcp", "llm", "broker"]
+categories = ["command-line-utilities", "development-tools"]

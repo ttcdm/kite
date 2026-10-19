@@ -25,3 +25,18 @@ jobs:
           name: e2e-artifacts-${{ matrix.os }}
           path: target/tmp/e2e-artifacts/
           retention-days: 14
+
+  # The oldest Rust that builds and tests Kite (rust-version in Cargo.toml).
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo test --workspace --lib --bins
+
+  # Known-vulnerable dependencies, licenses outside deny.toml, unknown sources.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
