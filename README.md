@@ -184,6 +184,12 @@ An agent with a `command` in `kite.toml` is launched by `kite up` and restarted 
 `KITE_AGENT`, `KITE_SOCKET` and `KITE_ROOT` in its environment, and its output goes to
 `.kite/logs/<agent>.log`. Each agent restarts on its own (one_for_one); there is no group restart.
 
+Each launched agent leads its own process group, so stopping `kite up` also stops whatever the
+agent started (an MCP server, a shell, a test run): SIGTERM to the group, then SIGKILL after
+`stop_grace_ms` (default 5000). The group id is kept in `.kite/run/<agent>.pid`. If `kite up` is
+killed with SIGKILL, nothing can stop its agents; the next `kite up` warns about any that are still
+running (in its log and as a `stale_agent_group` ledger note) but does not kill them.
+
 ## Claude Code lease guard
 
 ```json

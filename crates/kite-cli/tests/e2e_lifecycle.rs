@@ -123,3 +123,64 @@ timeout_ms = 20000
     let status = p.kite(&["status"]);
     assert_eq!(status.status.code(), Some(1), "the broker is gone after stop");
 }
+
+/// An agent that starts a long-running child of its own and records the child's pid.
+const PARENT_AGENT: &str = r#"
+import subprocess, sys, time
+child = subprocess.Popen(["sleep", "1000"])
+open(sys.argv[1], "w").write(str(child.pid))
+while True:
+    time.sleep(1)
+"#;
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().unwrap().success()
+}
+
+fn with_parent_agent(p: &Project) {
+    p.write("parent.py", PARENT_AGENT);
+    p.edit_config(|c| {
+        c.replacen(
+            "[agents.coder]\n",
+            "[agents.coder]\ncommand = [\"python3\", \"{root}/parent.py\", \"{root}/grandchild.pid\"]\nstop_grace_ms = 2000\n",
+            1,
+        )
+    });
+}
+
+#[tokio::test]
+async fn stopping_kite_up_ends_everything_an_agent_started() {
+    let mut p = Project::init("agent_group_stop");
+    with_parent_agent(&p);
+    p.up().await;
+    let pidfile = p.path("grandchild.pid");
+    let written = || std::fs::read_to_string(&pidfile).is_ok_and(|s| !s.trim().is_empty());
+    p.wait_until("the agent to record its child's pid", written).await;
+    let grandchild = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+    assert!(alive(&grandchild));
+    p.stop().await;
+    assert!(!alive(&grandchild), "the agent's own child outlived kite up");
+    assert!(!p.path(".kite/run/coder.pid").exists(), "the group record is removed on a clean stop");
+}
+
+#[tokio::test]
+async fn agents_left_by_a_killed_kite_up_are_reported_on_the_next_start() {
+    let mut p = Project::init("agent_group_stale");
+    with_parent_agent(&p);
+    p.up().await;
+    let record = p.path(".kite/run/coder.pid");
+    let recorded = || std::fs::read_to_string(&record).is_ok_and(|s| !s.trim().is_empty());
+    p.wait_until("the supervisor to record the agent's group", recorded).await;
+    let pgid = std::fs::read_to_string(&record).unwrap();
+    p.kill_hard().await;
+    assert!(alive(&pgid), "after SIGKILL nothing stops the agents");
+
+    p.edit_config(|c| c.replace("command = [\"python3\", \"{root}/parent.py\", \"{root}/grandchild.pid\"]\n", ""));
+    p.up().await;
+    p.wait_until("kite up to warn about the leftover agents", || p.up_log().contains("still running")).await;
+    // Clean up the leftovers the test created.
+    std::process::Command::new("kill").args(["-KILL", &format!("-{}", pgid.trim())]).status().unwrap();
+    p.stop().await;
+    let trace = p.ok(&["trace"]);
+    assert!(trace.contains("stale_agent_group"), "{trace}");
+}

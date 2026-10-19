@@ -165,10 +165,16 @@ pub struct AgentSpec {
     pub restart: Restart,
     #[serde(default = "d_restarts")]
     pub max_restarts: u32,
+    /// On stop, how long the agent's process group gets after SIGTERM before SIGKILL.
+    #[serde(default = "d_stop_grace")]
+    pub stop_grace_ms: u64,
 }
 
 fn d_restarts() -> u32 {
     3
+}
+fn d_stop_grace() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -141,6 +141,13 @@ impl Project {
         log
     }
 
+    /// Kills `kite up` with SIGKILL, as a crash would: no cleanup runs.
+    pub async fn kill_hard(&mut self) {
+        let mut child = self.up.take().expect("kite up is not running");
+        child.start_kill().unwrap();
+        tokio::time::timeout(STEP, child.wait()).await.expect("kite up did not die on SIGKILL").unwrap();
+    }
+
     pub fn up_log(&self) -> String {
         std::fs::read_to_string(self.path(".kite/up.log")).unwrap_or_default()
     }
