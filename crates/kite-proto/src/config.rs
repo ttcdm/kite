@@ -100,6 +100,9 @@ pub struct BoardSettings {
     /// At least one passing gate must be recorded by someone other than the card's owner.
     #[serde(default = "d_true")]
     pub independent_review: bool,
+    /// In a git project, a merged card's `merge_ref` must be a commit reachable from this ref.
+    #[serde(default = "d_mainline")]
+    pub mainline: String,
 }
 
 fn d_gates() -> Vec<String> {
@@ -108,10 +111,18 @@ fn d_gates() -> Vec<String> {
 fn d_true() -> bool {
     true
 }
+fn d_mainline() -> String {
+    "main".into()
+}
 
 impl Default for BoardSettings {
     fn default() -> Self {
-        BoardSettings { managers: Vec::new(), default_gates: d_gates(), independent_review: true }
+        BoardSettings {
+            managers: Vec::new(),
+            default_gates: d_gates(),
+            independent_review: true,
+            mainline: d_mainline(),
+        }
     }
 }
 
@@ -317,6 +328,11 @@ impl Config {
                 return Err(format!("board.default_gates: {g:?} must match [a-z][a-z0-9_-]{{0,63}}"));
             }
         }
+        let m = &raw.board.mainline;
+        if m.is_empty() || m.len() > 255 || m.starts_with('-') || m.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(format!("board.mainline: {m:?} must be a git ref name, not empty or starting with -"));
+        }
         Ok(Config { broker, registry, agents: raw.agents, routes, board: raw.board, root: root.to_path_buf() })
     }
 
@@ -360,6 +376,17 @@ mod tests {
         assert!(Config::parse(&bad, Path::new("/")).unwrap_err().contains("ghost"));
         let bad = BASE.replace("schemas = [\"task.do@1\"]", "schemas = [\"task.done@1\"]");
         assert!(Config::parse(&bad, Path::new("/")).unwrap_err().contains("response"));
+    }
+
+    #[test]
+    fn mainline_defaults_to_main_and_is_checked() {
+        assert_eq!(Config::parse(BASE, Path::new("/")).unwrap().board.mainline, "main");
+        let c = Config::parse(&format!("{BASE}\n[board]\nmainline = \"trunk\"\n"), Path::new("/")).unwrap();
+        assert_eq!(c.board.mainline, "trunk");
+        for bad in ["", "-x", "a b"] {
+            let text = format!("{BASE}\n[board]\nmainline = {bad:?}\n");
+            assert!(Config::parse(&text, Path::new("/")).unwrap_err().contains("mainline"), "{bad}");
+        }
     }
 
     #[test]

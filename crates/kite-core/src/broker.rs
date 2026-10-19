@@ -5,6 +5,7 @@
 
 use crate::board::{Applied, Board};
 use crate::ledger::{Ledger, now_ms};
+use crate::vcs::{Git, Vcs};
 use crate::waits::WaitGraph;
 use kite_proto::board::{CARD_SCHEMA, CardOp};
 use kite_proto::config::BROKER_AGENT;
@@ -220,6 +221,8 @@ pub struct Broker {
     seqs: HashMap<(String, String), u64>,
     log: Vec<Value>,
     board: Board,
+    /// Git for the project root, used by card moves that create worktrees or check merges.
+    vcs: Box<dyn Vcs + Send>,
 }
 
 fn err<T>(code: ErrorCode, message: impl Into<String>) -> KiteResult<T> {
@@ -288,6 +291,7 @@ impl Broker {
         let cards = crate::board::replay(crate::ledger::read_events(ledger.path()).unwrap_or_default());
         let board =
             Board::new(config.board.clone(), config.agents.keys().cloned().collect(), config.root.clone(), cards);
+        let vcs = Box::new(Git::new(config.root.clone()));
         let broker = Broker {
             config,
             ledger,
@@ -304,6 +308,7 @@ impl Broker {
             seqs: HashMap::new(),
             log: Vec::new(),
             board,
+            vcs,
         };
         let task = tokio::spawn(broker.run(rx));
         (BrokerHandle { tx, next_conn: Arc::new(AtomicU64::new(0)) }, task)
@@ -1019,7 +1024,7 @@ impl Broker {
     /// Applies a card operation; a change is recorded as a full card snapshot
     /// (which is what the board is rebuilt from) and announced to the agents it concerns.
     fn card_op(&mut self, by: &str, op: CardOp) -> KiteResult<Value> {
-        match self.board.apply(by, op, now_ms())? {
+        match self.board.apply(by, op, now_ms(), self.vcs.as_ref())? {
             Applied::Read(v) => Ok(v),
             Applied::Changed { card, action, notify } => {
                 self.log(json!({ "type": "card", "action": action, "by": by, "card": card }));

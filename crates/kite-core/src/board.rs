@@ -5,14 +5,21 @@
 //! Exit criteria (refused with `transition_refused` until met):
 //!   backlog → ready     acceptance criteria, merge gate and at least one gate (manager)
 //!   ready → running     an owner and a branch or worktree; only the owner starts it,
-//!                       and no other active card may use the same worktree
+//!                       and no other active card may use the same worktree. In a git
+//!                       project the worktree is added on its branch (or the branch is
+//!                       created, if the card has no worktree), and a git failure refuses
 //!   running → review    the owner's handoff file exists and evidence was recorded
 //!   review → merged     every gate passed in order, one of them by someone other
-//!                       than the owner (if independent_review), and a merge_ref (manager)
+//!                       than the owner (if independent_review), and a merge_ref (manager);
+//!                       in a git project merge_ref must be a commit on the mainline
+//!
+//! Git is reached only through the [`Vcs`] the caller passes in, so the board
+//! itself starts no processes.
 //!   any → blocked       a blocker with reason, owner and next action
 //!   blocked → (back)    only to the state it was blocked from
 //!   any → archived      a reason (manager)
 
+use crate::vcs::Vcs;
 use kite_proto::board::*;
 use kite_proto::config::{BoardSettings, valid_gate_name};
 use kite_proto::{ErrorCode, KiteError, KiteResult};
@@ -182,7 +189,7 @@ impl Board {
                 && matches!(c.resume_state, Some(CardState::Running) | Some(CardState::Review)))
     }
 
-    pub fn apply(&mut self, by: &str, op: CardOp, now: u64) -> KiteResult<Applied> {
+    pub fn apply(&mut self, by: &str, op: CardOp, now: u64, vcs: &dyn Vcs) -> KiteResult<Applied> {
         match op {
             CardOp::Get { id } => Ok(Applied::Read(serde_json::to_value(self.card(&id)?).expect("cards serialize"))),
             CardOp::List { state, owner } => {
@@ -197,7 +204,7 @@ impl Board {
             CardOp::Create { card } => self.create(by, card, now),
             CardOp::Update { id, patch } => self.update(by, &id, patch, now),
             CardOp::Move { id, to, blocker, reason, merge_ref } => {
-                self.move_card(by, &id, to, blocker, reason, merge_ref, now)
+                self.move_card(by, &id, to, blocker, reason, merge_ref, now, vcs)
             }
             CardOp::Evidence { id, kind, reference, note, gate, pass } => {
                 self.evidence(by, &id, kind, reference, note, gate, pass, now)
@@ -345,6 +352,7 @@ impl Board {
         reason: Option<String>,
         merge_ref: Option<String>,
         now: u64,
+        vcs: &dyn Vcs,
     ) -> KiteResult<Applied> {
         use CardState::*;
         let mut c = self.card(id)?.clone();
@@ -399,6 +407,23 @@ impl Board {
                     )
                     .with_detail(json!({ "card": other.id, "worktree": here })));
                 }
+                // Last, because it changes the repository: every other check has passed.
+                if vcs.is_repo() {
+                    let git =
+                        |what: String, e: String| not_met(format!("{what}: {e}")).with_detail(json!({ "git": e }));
+                    match (&c.worktree, &c.branch) {
+                        (Some(w), Some(b)) => vcs
+                            .checkout_worktree(&self.root.join(w), b)
+                            .map_err(|e| git(format!("cannot set up worktree {w} on branch {b}"), e))?,
+                        (Some(w), None) => {
+                            return Err(not_met(format!("set a branch for worktree {w}: git needs one to add it")));
+                        }
+                        (None, Some(b)) => {
+                            vcs.ensure_branch(b).map_err(|e| git(format!("cannot create branch {b}"), e))?
+                        }
+                        (None, None) => unreachable!("checked above"),
+                    }
+                }
                 notify.extend(self.managers_except(by));
                 "started"
             }
@@ -440,9 +465,25 @@ impl Board {
                     return Err(not_met(format!("a gate must be passed by someone other than {owner}")));
                 }
                 let r = merge_ref.as_deref().map(|r| text("merge_ref", r)).transpose()?;
-                let Some(r) = r else {
+                let Some(mut r) = r else {
                     return Err(not_met("give merge_ref: the commit or PR it landed in".into()));
                 };
+                if vcs.is_repo() {
+                    let mainline = &self.settings.mainline;
+                    let commit = vcs
+                        .resolve_commit(&r)
+                        .map_err(|e| not_met(format!("merge_ref {r} is not a commit in this repository ({e})")))?;
+                    let on = vcs
+                        .reachable_from(&commit, mainline)
+                        .map_err(|e| not_met(format!("cannot read mainline {mainline} ({e})")))?;
+                    if !on {
+                        return Err(not_met(format!(
+                            "merge_ref {r} ({commit}) is not reachable from {mainline}; merge it into {mainline} first"
+                        ))
+                        .with_detail(json!({ "commit": commit, "mainline": mainline })));
+                    }
+                    r = commit;
+                }
                 c.merge_ref = Some(r);
                 notify.extend(c.owner.iter().cloned());
                 "merged"
@@ -566,6 +607,74 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    /// A project that is not a git repository: the board checks nothing in git.
+    struct NoGit;
+
+    impl Vcs for NoGit {
+        fn is_repo(&self) -> bool {
+            false
+        }
+        fn checkout_worktree(&self, _: &Path, _: &str) -> Result<(), String> {
+            unreachable!("not a repository")
+        }
+        fn ensure_branch(&self, _: &str) -> Result<(), String> {
+            unreachable!("not a repository")
+        }
+        fn resolve_commit(&self, _: &str) -> Result<String, String> {
+            unreachable!("not a repository")
+        }
+        fn reachable_from(&self, _: &str, _: &str) -> Result<bool, String> {
+            unreachable!("not a repository")
+        }
+    }
+
+    /// A git repository in memory: branches, worktrees and which commits are on the mainline.
+    #[derive(Default)]
+    struct FakeGit {
+        branches: RefCell<BTreeSet<String>>,
+        worktrees: RefCell<BTreeMap<PathBuf, String>>,
+        /// ref → commit id
+        refs: BTreeMap<String, String>,
+        /// (commit, rev) pairs where the commit is reachable from rev.
+        reachable: BTreeSet<(String, String)>,
+        fail: Option<String>,
+    }
+
+    impl Vcs for FakeGit {
+        fn is_repo(&self) -> bool {
+            true
+        }
+        fn checkout_worktree(&self, dir: &Path, branch: &str) -> Result<(), String> {
+            if let Some(e) = &self.fail {
+                return Err(e.clone());
+            }
+            self.branches.borrow_mut().insert(branch.to_string());
+            self.worktrees.borrow_mut().insert(dir.to_path_buf(), branch.to_string());
+            Ok(())
+        }
+        fn ensure_branch(&self, branch: &str) -> Result<(), String> {
+            if let Some(e) = &self.fail {
+                return Err(e.clone());
+            }
+            self.branches.borrow_mut().insert(branch.to_string());
+            Ok(())
+        }
+        fn resolve_commit(&self, rev: &str) -> Result<String, String> {
+            self.refs.get(rev).cloned().ok_or_else(|| format!("{rev} does not name a commit"))
+        }
+        fn reachable_from(&self, commit: &str, rev: &str) -> Result<bool, String> {
+            self.resolve_commit(rev)?;
+            Ok(self.reachable.contains(&(commit.to_string(), rev.to_string())))
+        }
+    }
+
+    impl Board {
+        fn act(&mut self, by: &str, op: CardOp, now: u64) -> KiteResult<Applied> {
+            self.apply(by, op, now, &NoGit)
+        }
+    }
 
     struct T {
         board: Board,
@@ -578,6 +687,7 @@ mod tests {
             managers: managers.iter().map(|s| s.to_string()).collect(),
             default_gates: vec!["tests".into(), "diff_review".into()],
             independent_review: true,
+            mainline: "main".into(),
         };
         let agents = ["lead", "coder", "coder2", "reviewer"].iter().map(|s| s.to_string()).collect();
         T { board: Board::new(settings, agents, dir.path().to_path_buf(), BTreeMap::new()), dir }
@@ -639,20 +749,20 @@ mod tests {
     /// Creates card-001 and takes it to running, owned by coder in worktree `wt/a`.
     fn running(t: &mut T) {
         let b = &mut t.board;
-        changed(b.apply("lead", CardOp::Create { card: shaped("Add a flag") }, 1));
-        changed(b.apply("lead", mv(CardState::Ready), 2));
-        changed(b.apply("lead", patch(CardPatch { owner: Some("coder".into()), ..Default::default() }), 3));
-        changed(b.apply("lead", patch(CardPatch { worktree: Some("./wt/a/".into()), ..Default::default() }), 3));
-        changed(b.apply("coder", mv(CardState::Running), 4));
+        changed(b.act("lead", CardOp::Create { card: shaped("Add a flag") }, 1));
+        changed(b.act("lead", mv(CardState::Ready), 2));
+        changed(b.act("lead", patch(CardPatch { owner: Some("coder".into()), ..Default::default() }), 3));
+        changed(b.act("lead", patch(CardPatch { worktree: Some("./wt/a/".into()), ..Default::default() }), 3));
+        changed(b.act("coder", mv(CardState::Running), 4));
     }
 
     fn to_review(t: &mut T) {
         std::fs::create_dir_all(t.dir.path().join("wt/a")).unwrap();
         std::fs::write(t.dir.path().join("wt/a/HANDOFF.md"), "done").unwrap();
         let b = &mut t.board;
-        changed(b.apply("coder", patch(CardPatch { handoff: Some("HANDOFF.md".into()), ..Default::default() }), 5));
-        changed(b.apply("coder", ev(None, None), 5));
-        changed(b.apply("coder", mv(CardState::Review), 6));
+        changed(b.act("coder", patch(CardPatch { handoff: Some("HANDOFF.md".into()), ..Default::default() }), 5));
+        changed(b.act("coder", ev(None, None), 5));
+        changed(b.act("coder", mv(CardState::Review), 6));
     }
 
     #[test]
@@ -660,14 +770,14 @@ mod tests {
         let mut t = setup(&["lead"]);
         let b = &mut t.board;
         let draft = CardDraft { title: "x".into(), ..Default::default() };
-        let (c, _, _) = changed(b.apply("coder", CardOp::Create { card: draft }, 1));
+        let (c, _, _) = changed(b.act("coder", CardOp::Create { card: draft }, 1));
         assert_eq!((c.id.as_str(), c.state), ("card-001", CardState::Backlog));
-        assert_eq!(code(b.apply("coder", mv(CardState::Ready), 2)), ErrorCode::NotPermitted);
-        assert!(msg(b.apply("lead", mv(CardState::Ready), 2)).contains("acceptance"));
-        changed(b.apply("lead", patch(CardPatch { acceptance: Some(vec!["a".into()]), ..Default::default() }), 3));
-        assert!(msg(b.apply("lead", mv(CardState::Ready), 4)).contains("merge gate"));
-        changed(b.apply("lead", patch(CardPatch { merge_gate: Some("tests pass".into()), ..Default::default() }), 5));
-        let (c, action, _) = changed(b.apply("lead", mv(CardState::Ready), 6));
+        assert_eq!(code(b.act("coder", mv(CardState::Ready), 2)), ErrorCode::NotPermitted);
+        assert!(msg(b.act("lead", mv(CardState::Ready), 2)).contains("acceptance"));
+        changed(b.act("lead", patch(CardPatch { acceptance: Some(vec!["a".into()]), ..Default::default() }), 3));
+        assert!(msg(b.act("lead", mv(CardState::Ready), 4)).contains("merge gate"));
+        changed(b.act("lead", patch(CardPatch { merge_gate: Some("tests pass".into()), ..Default::default() }), 5));
+        let (c, action, _) = changed(b.act("lead", mv(CardState::Ready), 6));
         assert_eq!((c.state, action), (CardState::Ready, "shaped"));
     }
 
@@ -676,17 +786,17 @@ mod tests {
         let mut t = setup(&["lead"]);
         let b = &mut t.board;
         let draft = CardDraft { owner: Some("coder".into()), ..shaped("x") };
-        let (_, _, notify) = changed(b.apply("lead", CardOp::Create { card: draft }, 1));
+        let (_, _, notify) = changed(b.act("lead", CardOp::Create { card: draft }, 1));
         assert_eq!(notify, BTreeSet::from(["coder".to_string()]));
-        changed(b.apply("lead", mv(CardState::Ready), 2));
-        assert_eq!(code(b.apply("coder2", mv(CardState::Running), 3)), ErrorCode::NotPermitted);
-        assert!(msg(b.apply("coder", mv(CardState::Running), 3)).contains("branch or worktree"));
-        changed(b.apply("coder", patch(CardPatch { branch: Some("feat/x".into()), ..Default::default() }), 4));
-        let (c, _, notify) = changed(b.apply("coder", mv(CardState::Running), 5));
+        changed(b.act("lead", mv(CardState::Ready), 2));
+        assert_eq!(code(b.act("coder2", mv(CardState::Running), 3)), ErrorCode::NotPermitted);
+        assert!(msg(b.act("coder", mv(CardState::Running), 3)).contains("branch or worktree"));
+        changed(b.act("coder", patch(CardPatch { branch: Some("feat/x".into()), ..Default::default() }), 4));
+        let (c, _, notify) = changed(b.act("coder", mv(CardState::Running), 5));
         assert_eq!(c.state, CardState::Running);
         assert_eq!(notify, BTreeSet::from(["lead".to_string()]));
         // A running card keeps its owner and branch until it leaves running.
-        let e = b.apply("lead", patch(CardPatch { owner: Some("coder2".into()), ..Default::default() }), 6);
+        let e = b.act("lead", patch(CardPatch { owner: Some("coder2".into()), ..Default::default() }), 6);
         assert_eq!(code(e), ErrorCode::TransitionRefused);
     }
 
@@ -701,14 +811,90 @@ mod tests {
             worktree: Some("wt/a".into()),
             ..shaped("y")
         };
-        changed(b.apply("lead", CardOp::Create { card: draft }, 1));
-        changed(b.apply("lead", mv_id("other", CardState::Ready), 2));
-        let e = b.apply("coder2", mv_id("other", CardState::Running), 3).err().unwrap();
+        changed(b.act("lead", CardOp::Create { card: draft }, 1));
+        changed(b.act("lead", mv_id("other", CardState::Ready), 2));
+        let e = b.act("coder2", mv_id("other", CardState::Running), 3).err().unwrap();
         assert_eq!(e.code, ErrorCode::CardConflict);
         assert_eq!(e.detail.unwrap()["card"], "card-001");
         let own = CardPatch { worktree: Some("wt/b".into()), ..Default::default() };
-        changed(b.apply("coder2", CardOp::Update { id: "other".into(), patch: own }, 4));
-        changed(b.apply("coder2", mv_id("other", CardState::Running), 5));
+        changed(b.act("coder2", CardOp::Update { id: "other".into(), patch: own }, 4));
+        changed(b.act("coder2", mv_id("other", CardState::Running), 5));
+    }
+
+    #[test]
+    fn in_a_git_project_starting_adds_the_worktree_or_creates_the_branch() {
+        let mut t = setup(&["lead"]);
+        let root = t.dir.path().to_path_buf();
+        let b = &mut t.board;
+        let draft = CardDraft { owner: Some("coder".into()), worktree: Some("wt/a".into()), ..shaped("x") };
+        changed(b.act("lead", CardOp::Create { card: draft }, 1));
+        changed(b.act("lead", mv(CardState::Ready), 2));
+        let git = FakeGit::default();
+        let e = msg(b.apply("coder", mv(CardState::Running), 3, &git));
+        assert!(e.contains("set a branch for worktree wt/a"), "{e}");
+        changed(b.act("coder", patch(CardPatch { branch: Some("feat/a".into()), ..Default::default() }), 4));
+
+        // A git failure refuses the move, says why, and leaves the card ready.
+        let broken = FakeGit { fail: Some("fatal: 'feat/a' is already checked out".into()), ..Default::default() };
+        let e = b.apply("coder", mv(CardState::Running), 5, &broken).err().unwrap();
+        assert_eq!(e.code, ErrorCode::TransitionRefused);
+        assert!(e.message.contains("cannot set up worktree wt/a on branch feat/a: fatal:"), "{}", e.message);
+        assert!(e.detail.unwrap()["git"].as_str().unwrap().contains("already checked out"));
+        assert_eq!(b.card("card-001").unwrap().state, CardState::Ready);
+
+        let (c, _, _) = changed(b.apply("coder", mv(CardState::Running), 6, &git));
+        assert_eq!(c.state, CardState::Running);
+        assert_eq!(git.worktrees.borrow().get(&root.join("wt/a")).map(String::as_str), Some("feat/a"));
+
+        // Without a worktree the branch must exist or be created.
+        let draft = CardDraft {
+            id: Some("solo".into()),
+            owner: Some("coder2".into()),
+            branch: Some("feat/b".into()),
+            ..shaped("y")
+        };
+        changed(b.act("lead", CardOp::Create { card: draft }, 7));
+        changed(b.act("lead", mv_id("solo", CardState::Ready), 8));
+        let e = msg(b.apply("coder2", mv_id("solo", CardState::Running), 9, &broken));
+        assert!(e.contains("cannot create branch feat/b"), "{e}");
+        changed(b.apply("coder2", mv_id("solo", CardState::Running), 10, &git));
+        assert!(git.branches.borrow().contains("feat/b"));
+        assert_eq!(git.worktrees.borrow().len(), 1);
+    }
+
+    #[test]
+    fn in_a_git_project_merge_ref_must_be_a_commit_on_the_mainline() {
+        let mut t = setup(&["lead"]);
+        running(&mut t);
+        to_review(&mut t);
+        let b = &mut t.board;
+        changed(b.act("reviewer", ev(Some("tests"), Some(true)), 7));
+        changed(b.act("reviewer", ev(Some("diff_review"), Some(true)), 7));
+        let merge = |r: &str| CardOp::Move {
+            id: "card-001".into(),
+            to: CardState::Merged,
+            blocker: None,
+            reason: None,
+            merge_ref: Some(r.into()),
+        };
+        let mut git =
+            FakeGit { refs: BTreeMap::from([("feat/a".to_string(), "c1".to_string())]), ..Default::default() };
+        let e = msg(b.apply("lead", merge("nope"), 8, &git));
+        assert!(e.contains("merge_ref nope is not a commit in this repository"), "{e}");
+        let e = msg(b.apply("lead", merge("feat/a"), 8, &git));
+        assert!(e.contains("cannot read mainline main"), "{e}");
+        git.refs.insert("main".into(), "m1".into());
+        let e = b.apply("lead", merge("feat/a"), 9, &git).err().unwrap();
+        assert!(
+            e.message.contains("feat/a (c1) is not reachable from main; merge it into main first"),
+            "{}",
+            e.message
+        );
+        assert_eq!(e.detail.unwrap()["commit"], "c1");
+        git.reachable.insert(("c1".into(), "main".into()));
+        let (c, _, _) = changed(b.apply("lead", merge("feat/a"), 10, &git));
+        // The resolved commit is kept, not the ref, which may move later.
+        assert_eq!((c.state, c.merge_ref.as_deref()), (CardState::Merged, Some("c1")));
     }
 
     #[test]
@@ -716,20 +902,20 @@ mod tests {
         let mut t = setup(&["lead"]);
         running(&mut t);
         let b = &mut t.board;
-        assert!(msg(b.apply("coder", mv(CardState::Review), 5)).contains("handoff"));
-        changed(b.apply("coder", patch(CardPatch { handoff: Some("HANDOFF.md".into()), ..Default::default() }), 5));
-        assert!(msg(b.apply("coder", mv(CardState::Review), 5)).contains("does not exist"));
+        assert!(msg(b.act("coder", mv(CardState::Review), 5)).contains("handoff"));
+        changed(b.act("coder", patch(CardPatch { handoff: Some("HANDOFF.md".into()), ..Default::default() }), 5));
+        assert!(msg(b.act("coder", mv(CardState::Review), 5)).contains("does not exist"));
         std::fs::create_dir_all(t.dir.path().join("wt/a")).unwrap();
         std::fs::write(t.dir.path().join("wt/a/HANDOFF.md"), "notes").unwrap();
         let b = &mut t.board;
-        assert!(msg(b.apply("coder", mv(CardState::Review), 6)).contains("evidence"));
-        changed(b.apply("coder", ev(None, None), 6));
-        assert_eq!(code(b.apply("lead", mv(CardState::Review), 7)), ErrorCode::NotPermitted);
-        let (c, action, notify) = changed(b.apply("coder", mv(CardState::Review), 7));
+        assert!(msg(b.act("coder", mv(CardState::Review), 6)).contains("evidence"));
+        changed(b.act("coder", ev(None, None), 6));
+        assert_eq!(code(b.act("lead", mv(CardState::Review), 7)), ErrorCode::NotPermitted);
+        let (c, action, notify) = changed(b.act("coder", mv(CardState::Review), 7));
         assert_eq!((c.state, action), (CardState::Review, "submitted"));
         assert_eq!(notify, BTreeSet::from(["lead".to_string()]));
         let bad = CardPatch { handoff: Some("../escape.md".into()), ..Default::default() };
-        assert_eq!(code(b.apply("coder", patch(bad), 8)), ErrorCode::InvalidArgument);
+        assert_eq!(code(b.act("coder", patch(bad), 8)), ErrorCode::InvalidArgument);
     }
 
     #[test]
@@ -738,9 +924,9 @@ mod tests {
         running(&mut t);
         to_review(&mut t);
         let b = &mut t.board;
-        let e = msg(b.apply("reviewer", ev(Some("diff_review"), Some(true)), 7));
+        let e = msg(b.act("reviewer", ev(Some("diff_review"), Some(true)), 7));
         assert!(e.contains("tests must pass before diff_review"), "{e}");
-        changed(b.apply("coder", ev(Some("tests"), Some(true)), 7));
+        changed(b.act("coder", ev(Some("tests"), Some(true)), 7));
         let merge = |r: Option<&str>| CardOp::Move {
             id: "card-001".into(),
             to: CardState::Merged,
@@ -748,19 +934,19 @@ mod tests {
             reason: None,
             merge_ref: r.map(str::to_string),
         };
-        assert!(msg(b.apply("lead", merge(Some("abc123")), 8)).contains("diff_review"));
-        changed(b.apply("coder", ev(Some("diff_review"), Some(true)), 8));
+        assert!(msg(b.act("lead", merge(Some("abc123")), 8)).contains("diff_review"));
+        changed(b.act("coder", ev(Some("diff_review"), Some(true)), 8));
         // Both gates passed, but only by the owner.
-        assert!(msg(b.apply("lead", merge(Some("abc123")), 9)).contains("someone other than coder"));
-        let (_, action, notify) = changed(b.apply("reviewer", ev(Some("diff_review"), Some(true)), 9));
+        assert!(msg(b.act("lead", merge(Some("abc123")), 9)).contains("someone other than coder"));
+        let (_, action, notify) = changed(b.act("reviewer", ev(Some("diff_review"), Some(true)), 9));
         assert_eq!(action, "gate_passed");
         assert_eq!(notify, BTreeSet::from(["coder".to_string()]));
-        assert!(msg(b.apply("lead", merge(None), 10)).contains("merge_ref"));
-        assert_eq!(code(b.apply("coder", merge(Some("abc123")), 10)), ErrorCode::NotPermitted);
-        let (c, _, _) = changed(b.apply("lead", merge(Some("abc123")), 10));
+        assert!(msg(b.act("lead", merge(None), 10)).contains("merge_ref"));
+        assert_eq!(code(b.act("coder", merge(Some("abc123")), 10)), ErrorCode::NotPermitted);
+        let (c, _, _) = changed(b.act("lead", merge(Some("abc123")), 10));
         assert_eq!((c.state, c.merge_ref.as_deref()), (CardState::Merged, Some("abc123")));
-        assert_eq!(code(b.apply("lead", mv(CardState::Running), 11)), ErrorCode::TransitionRefused);
-        assert_eq!(code(b.apply("coder", ev(None, None), 11)), ErrorCode::TransitionRefused);
+        assert_eq!(code(b.act("lead", mv(CardState::Running), 11)), ErrorCode::TransitionRefused);
+        assert_eq!(code(b.act("coder", ev(None, None), 11)), ErrorCode::TransitionRefused);
     }
 
     #[test]
@@ -769,14 +955,14 @@ mod tests {
         running(&mut t);
         to_review(&mut t);
         let b = &mut t.board;
-        changed(b.apply("reviewer", ev(Some("tests"), Some(true)), 7));
-        let (_, action, notify) = changed(b.apply("reviewer", ev(Some("diff_review"), Some(false)), 8));
+        changed(b.act("reviewer", ev(Some("tests"), Some(true)), 7));
+        let (_, action, notify) = changed(b.act("reviewer", ev(Some("diff_review"), Some(false)), 8));
         assert_eq!(action, "gate_failed");
         assert_eq!(notify, BTreeSet::from(["coder".to_string(), "lead".to_string()]));
-        let (c, _, _) = changed(b.apply("coder", mv(CardState::Running), 9));
+        let (c, _, _) = changed(b.act("coder", mv(CardState::Running), 9));
         assert_eq!((c.revision, c.gates_passed()), (2, 0));
         // Revision 2 needs its own evidence before review.
-        assert!(msg(b.apply("coder", mv(CardState::Review), 10)).contains("evidence"));
+        assert!(msg(b.act("coder", mv(CardState::Review), 10)).contains("evidence"));
     }
 
     #[test]
@@ -784,7 +970,7 @@ mod tests {
         let mut t = setup(&["lead"]);
         running(&mut t);
         let b = &mut t.board;
-        assert!(msg(b.apply("coder", mv(CardState::Blocked), 5)).contains("blocker"));
+        assert!(msg(b.act("coder", mv(CardState::Blocked), 5)).contains("blocker"));
         let block = CardOp::Move {
             id: "card-001".into(),
             to: CardState::Blocked,
@@ -796,11 +982,11 @@ mod tests {
             reason: None,
             merge_ref: None,
         };
-        let (c, _, _) = changed(b.apply("coder", block, 6));
+        let (c, _, _) = changed(b.act("coder", block, 6));
         assert_eq!((c.state, c.resume_state), (CardState::Blocked, Some(CardState::Running)));
-        let e = b.apply("coder", mv(CardState::Review), 7).err().unwrap();
+        let e = b.act("coder", mv(CardState::Review), 7).err().unwrap();
         assert_eq!(e.detail.unwrap()["allowed"][0], "running");
-        let (c, action, _) = changed(b.apply("lead", mv(CardState::Running), 8));
+        let (c, action, _) = changed(b.act("lead", mv(CardState::Running), 8));
         assert_eq!((c.state, action, c.blocker), (CardState::Running, "unblocked", None));
     }
 
@@ -816,9 +1002,9 @@ mod tests {
             reason: r.map(str::to_string),
             merge_ref: None,
         };
-        assert_eq!(code(b.apply("coder", archive(Some("dup")), 5)), ErrorCode::NotPermitted);
-        assert!(msg(b.apply("lead", archive(None), 5)).contains("reason"));
-        let (c, _, _) = changed(b.apply("lead", archive(Some("superseded by card-002")), 6));
+        assert_eq!(code(b.act("coder", archive(Some("dup")), 5)), ErrorCode::NotPermitted);
+        assert!(msg(b.act("lead", archive(None), 5)).contains("reason"));
+        let (c, _, _) = changed(b.act("lead", archive(Some("superseded by card-002")), 6));
         assert_eq!(c.archive_reason.as_deref(), Some("superseded by card-002"));
     }
 
@@ -833,7 +1019,7 @@ mod tests {
         let agents = BTreeSet::from(["lead".to_string()]);
         let mut b = Board::new(BoardSettings::default(), agents, PathBuf::from("/"), cards);
         let draft = CardDraft { title: "next".into(), ..Default::default() };
-        let (c, _, _) = changed(b.apply("lead", CardOp::Create { card: draft }, 1));
+        let (c, _, _) = changed(b.act("lead", CardOp::Create { card: draft }, 1));
         assert_eq!(c.id, "card-002");
     }
 }

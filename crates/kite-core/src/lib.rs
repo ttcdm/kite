@@ -9,6 +9,7 @@ pub mod ledger;
 pub mod runner;
 pub mod server;
 pub mod supervisor;
+pub mod vcs;
 pub mod waits;
 
 pub use broker::{Broker, BrokerHandle, ConnId, Reply};
