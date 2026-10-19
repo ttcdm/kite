@@ -48,6 +48,9 @@ pub struct BrokerSettings {
     pub socket: PathBuf,
     #[serde(default = "d_ledger")]
     pub ledger: PathBuf,
+    /// Connections the broker accepts at once; more are refused with `busy`.
+    #[serde(default = "d_max_connections")]
+    pub max_connections: usize,
 }
 
 fn d_capacity() -> usize {
@@ -71,6 +74,9 @@ fn d_socket() -> PathBuf {
 fn d_ledger() -> PathBuf {
     PathBuf::from(".kite/ledger.jsonl")
 }
+fn d_max_connections() -> usize {
+    256
+}
 
 impl Default for BrokerSettings {
     fn default() -> Self {
@@ -83,6 +89,7 @@ impl Default for BrokerSettings {
             fsync: Fsync::default(),
             socket: d_socket(),
             ledger: d_ledger(),
+            max_connections: d_max_connections(),
         }
     }
 }
@@ -248,6 +255,9 @@ impl Config {
     pub fn parse(text: &str, root: &Path) -> Result<Config, String> {
         let raw: RawConfig = toml::from_str(text).map_err(|e| e.to_string())?;
         let mut broker = raw.broker;
+        if broker.max_connections == 0 {
+            return Err("broker.max_connections must be at least 1".into());
+        }
         if broker.mailbox_capacity == 0 {
             return Err("broker.mailbox_capacity must be at least 1".into());
         }

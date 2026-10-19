@@ -358,7 +358,8 @@ async fn up(paths: &paths::Paths, config: kite_proto::Config, no_supervise: bool
     let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync)?;
     let (handle, mut broker) = Broker::spawn(config.clone(), ledger);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(server::serve(listener, paths.socket.clone(), handle.clone(), async {
+    let limits = server::Limits { max_connections: config.broker.max_connections, ..Default::default() };
+    let server = tokio::spawn(server::serve(listener, paths.socket.clone(), handle.clone(), limits, async {
         let _ = stop_rx.await;
     }));
     let sup = if no_supervise {
@@ -404,6 +405,11 @@ fn init_here(force: bool) -> anyhow::Result<()> {
     let parsed = kite_proto::Config::load(&config).map_err(anyhow::Error::msg)?;
     let mcp_dir = dir.join(".kite/mcp");
     std::fs::create_dir_all(&mcp_dir)?;
+    // .kite/ holds the socket (and later the agents' tokens): owner only.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join(".kite"), std::fs::Permissions::from_mode(0o700))?;
+    }
     for agent in parsed.agents.keys() {
         let body = serde_json::to_string_pretty(&init::mcp_json(&kite_exe(), agent, &config))?;
         std::fs::write(mcp_dir.join(format!("{agent}.json")), body)?;

@@ -202,6 +202,30 @@ it also blocks edits to files the agent has not leased. If the broker is unreach
 edit and prints a warning. This hook is Claude Code specific; other hosts rely on agents calling
 `kite_lease`.
 
+## Operations
+
+`[broker]` settings in `kite.toml`, all optional:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mailbox_capacity` | 64 | messages queued plus handed out per agent before senders get `busy` |
+| `default_timeout_ms` / `max_timeout_ms` | 120000 / 3600000 | request deadlines |
+| `max_redeliveries` | 3 | times a message is handed out again after its agent disconnects before it is dead-lettered |
+| `max_lease_ms` | 3600000 | longest lease |
+| `max_connections` | 256 | connections open at once; more are refused with `busy` |
+| `fsync` | `"batch"` | `"always"` syncs the ledger after every record |
+| `socket` / `ledger` | `.kite/kite.sock` / `.kite/ledger.jsonl` | paths, relative to `kite.toml` |
+
+The socket's directory is kept private: `kite up` restricts it to its owner (0700) and refuses a
+directory that belongs to another user. A connection that has not tried to register is closed
+after 60 seconds without a frame.
+
+**Durability.** A reply means the broker accepted the operation and queued its ledger record.
+With `fsync = "batch"` the ledger is synced whenever its queue empties, so a power cut can lose
+the last moments of activity; with `fsync = "always"` every record is synced before the next is
+written. A crash in the middle of a write leaves at most one torn final record, which the next
+start repairs and records as `recovered`.
+
 ## Limits
 
 - One machine, one broker, Unix sockets only (macOS and Linux). Socket paths are limited to about

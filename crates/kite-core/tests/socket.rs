@@ -67,6 +67,10 @@ struct Stack {
 }
 
 async fn start() -> Stack {
+    start_with(server::Limits::default()).await
+}
+
+async fn start_with(limits: server::Limits) -> Stack {
     let dir = tempfile::tempdir().unwrap();
     let config = Arc::new(Config::parse(CONFIG, &dir.path().canonicalize().unwrap()).unwrap());
     let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync).unwrap();
@@ -74,7 +78,7 @@ async fn start() -> Stack {
     let socket = config.broker.socket.clone();
     let listener = server::bind(&socket).await.unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
-    let server = tokio::spawn(server::serve(listener, socket.clone(), handle.clone(), async {
+    let server = tokio::spawn(server::serve(listener, socket.clone(), handle.clone(), limits, async {
         let _ = stopped.await;
     }));
     Stack { dir, socket, config, handle, stop: Some(stop), server, broker }
@@ -322,4 +326,68 @@ async fn concurrent_senders_get_exactly_once_in_order_delivery_under_backpressur
     // Not asserted: how often senders were refused, which depends on scheduling.
     eprintln!("senders were refused with busy {busy} times");
     s.shutdown().await;
+}
+
+/// Sends a status frame on a raw connection and returns the first reply line.
+async fn status_reply(socket: &PathBuf) -> Value {
+    let mut stream = UnixStream::connect(socket).await.unwrap();
+    stream.write_all(b"{\"id\": 1, \"op\": \"status\"}\n").await.unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).await.unwrap();
+    serde_json::from_str(&line).unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn connections_over_the_limit_are_refused_until_one_closes() {
+    let s = start_with(server::Limits { max_connections: 2, ..Default::default() }).await;
+    let first = Client::connect(&s.socket).await.unwrap();
+    let second = Client::connect(&s.socket).await.unwrap();
+    first.status(None).await.unwrap();
+    second.status(None).await.unwrap();
+    let refused = status_reply(&s.socket).await;
+    assert_eq!(refused["error"]["code"], "busy", "{refused}");
+
+    drop(first);
+    // The slot frees once the server sees the connection close.
+    let mut freed = false;
+    for _ in 0..200 {
+        if status_reply(&s.socket).await["ok"]["protocol"] == "kite/1" {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(freed, "a closed connection gave its slot back");
+    drop(second);
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_silent_unregistered_connection_is_closed() {
+    let s = start_with(server::Limits { idle_unregistered: Duration::from_millis(200), ..Default::default() }).await;
+    let stream = UnixStream::connect(&s.socket).await.unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    let goodbye = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await.unwrap().unwrap().unwrap();
+    assert!(goodbye.contains("never registered"), "{goodbye}");
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await.unwrap().unwrap(), None);
+    // A registered connection may stay quiet as long as it likes.
+    let quiet = Client::connect(&s.socket).await.unwrap();
+    quiet.register("lead").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    quiet.status(None).await.unwrap();
+    drop(quiet);
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_open_socket_directory_is_made_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let sock_dir = dir.path().join("run");
+    std::fs::create_dir(&sock_dir).unwrap();
+    std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let listener = server::bind(&sock_dir.join("kite.sock")).await.unwrap();
+    let mode = std::fs::metadata(&sock_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    drop(listener);
 }
