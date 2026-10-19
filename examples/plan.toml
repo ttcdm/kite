@@ -1,0 +1,27 @@
+# A task graph for the starter team from `kite init`. Run it with:
+#   kite run examples/plan.toml
+# The runner registers as `lead`, so no other session may be connected as lead.
+
+as = "lead"
+max_parallel = 2
+fail_fast = false
+
+[[tasks]]
+id = "parser"
+to = "coder"
+schema = "task.assign@1"
+payload = { goal = "Add a --dry-run flag to the CLI parser", files = ["src/cli.rs"] }
+timeout_ms = 1800000
+
+[[tasks]]
+id = "docs"
+to = "coder"
+schema = "task.assign@1"
+payload = { goal = "Document --dry-run in README.md", files = ["README.md"] }
+
+[[tasks]]
+id = "review"
+to = "reviewer"
+schema = "review.request@1"
+after = ["parser", "docs"]
+payload = { summary = "${tasks.parser.result.summary}", files = "${tasks.parser.result.files_changed}" }

@@ -1,0 +1,12 @@
+[package]
+name = "kite-proto"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jsonschema = "0.59.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+toml = "1.1.8"
+ulid = { version = "3.0.0", features = ["serde"] }
