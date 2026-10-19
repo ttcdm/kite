@@ -1,5 +1,6 @@
 //! Human-readable output for `kite status` and `kite trace`.
 
+use kite_core::ledger::now_ms;
 use kite_proto::board::{Card, CardState};
 use kite_proto::wire::{
     AgentDetail, AgentStatus, MessageSummary, ProcessState, ProcessStatus, RequestSummary, StatusOk,
@@ -117,10 +118,6 @@ pub fn detail(d: &AgentDetail) -> String {
         let _ = writeln!(out, "  {}  until {}", l.resource, clock(l.expires_at_ms));
     }
     out
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// How long ago a Unix-ms time was, in the largest whole unit.
