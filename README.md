@@ -298,8 +298,13 @@ throwaway setups. What tokens do and do not protect against is in [SECURITY.md](
   (see [SECURITY.md](SECURITY.md)).
 - Leases are advisory except where a hook enforces them (the Claude Code hook above).
 - Responses are checked against their schema; whether the work they describe was done is not.
-- The adapter commands in `kite init`'s comments are examples and have not been tested against
-  each host's current CLI flags.
+- **Not yet tried with real agent hosts.** Every test drives Kite with scripted agents: MCP
+  sessions, the CLI, and a Python agent. How well Claude Code, Codex, Gemini CLI or Cursor use the
+  tools, and how each passes `--token-file` and environment variables to `kite mcp`, is
+  unverified. The adapter commands in `kite init`'s comments are examples only.
+- A single long-running `kite up` grows one ledger segment; compaction happens at the next start.
+- Git work for a card runs on a blocking thread, one command at a time per move; a hung command
+  is killed at `git_timeout_ms`.
 
 ## Layout
 

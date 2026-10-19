@@ -27,7 +27,8 @@ connection task ──submit(op)──► [ bounded command channel ] ──► 
 | per connection: writer | tokio task | writes replies as they complete, so a long `recv` does not hold up a `send` on the same connection |
 | per pending reply | tokio task | waits on the oneshot and forwards to the writer |
 | ledger writer | dedicated OS thread | file writes and fsync never stall the event loop; the bounded queue in front of it slows the broker if the disk falls behind |
-| supervisor, per launched agent | tokio task | spawns, waits on and restarts one process |
+| supervisor, per launched agent | tokio task | spawns, waits on and restarts one process group (SIGTERM, then SIGKILL after `stop_grace_ms`) |
+| git work for a card move | blocking thread | runs the move's git commands with a deadline; the result returns to the broker as a command |
 | runner, per running task | tokio task in a `JoinSet` | one blocking request per task, up to `max_parallel` at once |
 | MCP server, per tool call | tokio task | a host's parallel tool calls run concurrently |
 
@@ -117,8 +118,13 @@ because refusing them would leave a request with no answer.
   trips, idempotent resend, timeouts, deadlock refusal, leases and the Claude Code hook, a
   CLI-only agent), `e2e_board` (a card from backlog to merged, real git worktrees and merges
   that must be on main, the board after a restart) and `e2e_lifecycle` (setup errors, a second
-  broker refused, queued work kept across a restart, a supervised Python agent driven by
-  `kite run`). Every test stops the broker with SIGTERM and requires a clean exit.
+  broker refused, queued work kept across plain and compacting restarts, a supervised Python
+  agent driven by `kite run`, agent process groups stopped as a whole and leftovers of a killed
+  `kite up` reported) and `e2e_security` (agents refused without their own token, token
+  rotation, no token in generated configs or the ledger). Every test stops the broker with
+  SIGTERM and requires a clean exit.
+- Ledger compaction is checked against full replay at every cut point of a recorded history;
+  git work is checked with a fake git that blocks and with a real hook that hangs.
 - `tests/common/mod.rs` holds the fixtures. Every wait polls for a state with a 30-second
   limit, so a hang fails with a message. A test that panics copies up.log, the ledger,
   `kite trace`, `kite board`, `kite status`, kite.toml and agent logs to
