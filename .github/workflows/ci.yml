@@ -14,3 +14,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The end-to-end suites start real processes; three more passes catch flaky ones.
+      - name: e2e, repeated
+        shell: bash
+        run: for i in 1 2 3; do cargo test -p kite-cli --test 'e2e_*' || exit 1; done
+      # A failing e2e test leaves up.log, the ledger, trace, board and status here.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-artifacts-${{ matrix.os }}
+          path: target/tmp/e2e-artifacts/
+          retention-days: 14

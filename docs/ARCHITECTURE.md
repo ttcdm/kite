@@ -94,5 +94,16 @@ because refusing them would leave a request with no answer.
   lease tests run on tokio's paused clock, so no assertion depends on how long anything took.
 - Socket tests run the real server and client, including 8 concurrent senders on a multi-threaded
   runtime checking exactly-once, in-order delivery.
-- The end-to-end test runs the compiled `kite` binary: `init`, `up`, two `kite mcp` servers
-  speaking JSON-RPC, the lease hook, `status`, `trace --verify`, and shutdown on SIGTERM.
+- The end-to-end suites (`crates/kite-cli/tests/e2e_*.rs`) run the compiled `kite` binary
+  through what users and agent hosts do: `e2e_messaging` (MCP handshake, checked request round
+  trips, idempotent resend, timeouts, deadlock refusal, leases and the Claude Code hook, a
+  CLI-only agent), `e2e_board` (a card from backlog to merged, real git worktrees and merges
+  that must be on main, the board after a restart) and `e2e_lifecycle` (setup errors, a second
+  broker refused, queued work kept across a restart, a supervised Python agent driven by
+  `kite run`). Every test stops the broker with SIGTERM and requires a clean exit.
+- `tests/common/mod.rs` holds the fixtures. Every wait polls for a state with a 30-second
+  limit, so a hang fails with a message. A test that panics copies up.log, the ledger,
+  `kite trace`, `kite board`, `kite status`, kite.toml and agent logs to
+  `target/tmp/e2e-artifacts/<test>/`; CI uploads that directory when a run fails.
+- CI runs the e2e suites three extra times. Locally, three suites at once is a good flake check:
+  it found a startup window in which SIGTERM killed `kite up` uncleanly.

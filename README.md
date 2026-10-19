@@ -226,3 +226,12 @@ edit and prints a warning. This hook is Claude Code specific; other hosts rely o
 ```bash
 cargo test
 ```
+
+The end-to-end suites alone, which run the compiled binary:
+
+```bash
+cargo test -p kite-cli --test 'e2e_*'
+```
+
+A failing end-to-end test saves its evidence (up.log, ledger, trace, board, status, agent logs)
+to `target/tmp/e2e-artifacts/<test>/`.
