@@ -717,3 +717,26 @@ async fn a_request_to_an_agent_removed_from_the_config_answers_peer_down() {
     assert_eq!(err.detail.unwrap()["closed"], "peer_down");
     e.stop().await;
 }
+
+#[tokio::test]
+async fn a_torn_ledger_tail_is_repaired_and_recorded_on_the_next_start() {
+    let e = start();
+    let lead = e.agent("lead").await;
+    e.agent("worker").await;
+    e.h.call(lead, send(draft("worker", "note@1", json!({"n": 1})))).await.result.unwrap();
+    let (dir, _) = e.stop_keep().await;
+    // A crash halfway through writing the next record.
+    let path = dir.path().join(".kite/ledger.jsonl");
+    let torn: &[u8] = b"{\"n\":99,\"ts_ms\":1,\"prev\":\"de";
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut f, torn).unwrap();
+    drop(f);
+
+    let e = start_in(dir);
+    let worker = e.agent("worker").await;
+    let got: RecvOk = ok(e.h.call(worker, recv(0)).await);
+    assert_eq!(got.messages[0].payload, json!({"n": 1}), "the note survived the torn tail");
+    let events = e.stop().await;
+    let recovered = events.iter().find(|ev| ev["type"] == "recovered").expect("a recovered event");
+    assert_eq!(recovered["bytes_dropped"], torn.len());
+}

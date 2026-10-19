@@ -330,6 +330,10 @@ impl Broker {
             "agents": self.slots.keys().collect::<Vec<_>>(),
             "schemas": self.config.registry.contracts().map(|c| c.schema_ref.to_string()).collect::<Vec<_>>(),
         }));
+        if let Some(bytes) = self.ledger.recovered() {
+            tracing::warn!(bytes, "ledger ended in a torn record; it was repaired");
+            self.log(json!({ "type": "recovered", "bytes_dropped": bytes }));
+        }
         self.restore(restored);
         self.flush_log().await?;
         let mut stop: Option<oneshot::Sender<()>> = None;

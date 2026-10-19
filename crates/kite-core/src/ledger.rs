@@ -24,6 +24,30 @@ pub struct Ledger {
     tx: Option<mpsc::Sender<Msg>>,
     thread: Option<JoinHandle<io::Result<()>>>,
     path: PathBuf,
+    recovered: Option<u64>,
+}
+
+/// Repairs a final line left incomplete by a crash mid-write. A complete
+/// record whose newline was lost gets the newline back; anything else after
+/// the last newline is cut off. Returns the bytes dropped, or None if the
+/// file already ended cleanly. Complete lines are never touched, so a bad
+/// hash still fails verification.
+fn repair_tail(path: &Path, file: &mut File) -> io::Result<Option<u64>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return Ok(None);
+    }
+    let start = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let tail = &bytes[start..];
+    let complete = serde_json::from_slice::<Value>(tail).is_ok_and(|v| v.get("hash").is_some());
+    if complete {
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        return Ok(Some(0));
+    }
+    file.set_len(start as u64)?;
+    file.sync_data()?;
+    Ok(Some(tail.len() as u64))
 }
 
 pub fn now_ms() -> u64 {
@@ -110,7 +134,7 @@ impl Ledger {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -121,6 +145,7 @@ impl Ledger {
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
+        let recovered = repair_tail(path, &mut file)?;
         let (n, prev) = if std::fs::metadata(path)?.len() > 0 {
             let r = verify(path).map_err(|e| {
                 io::Error::new(
@@ -135,11 +160,17 @@ impl Ledger {
         let (tx, rx) = mpsc::channel(QUEUE);
         let thread =
             std::thread::Builder::new().name("kite-ledger".into()).spawn(move || writer(file, rx, n, prev, fsync))?;
-        Ok(Ledger { tx: Some(tx), thread: Some(thread), path: path.to_path_buf() })
+        Ok(Ledger { tx: Some(tx), thread: Some(thread), path: path.to_path_buf(), recovered })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Bytes of a torn final record that `open` cut off (0 if it only restored a
+    /// missing newline), or None if the ledger ended cleanly.
+    pub fn recovered(&self) -> Option<u64> {
+        self.recovered
     }
 
     pub async fn append(&self, event: Value) -> io::Result<()> {
@@ -239,6 +270,41 @@ mod tests {
         // Closing releases the lock.
         Ledger::open(&p, Fsync::Batch).unwrap().close().unwrap();
         assert_eq!(verify(&p).unwrap().records, 1);
+    }
+
+    #[tokio::test]
+    async fn a_torn_final_record_is_cut_off_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("l.jsonl");
+        let l = Ledger::open(&p, Fsync::Batch).unwrap();
+        l.append(json!({"type": "a"})).await.unwrap();
+        l.close().unwrap();
+        let clean = std::fs::read(&p).unwrap();
+        // A crash halfway through the next record.
+        let torn: &[u8] = b"{\"n\":2,\"ts_ms\":1,\"prev\":\"ab";
+        std::fs::write(&p, [clean.as_slice(), torn].concat()).unwrap();
+        let l = Ledger::open(&p, Fsync::Batch).unwrap();
+        assert_eq!(l.recovered(), Some(torn.len() as u64));
+        l.append(json!({"type": "b"})).await.unwrap();
+        l.close().unwrap();
+        assert_eq!(verify(&p).unwrap().records, 2);
+    }
+
+    #[tokio::test]
+    async fn a_complete_record_missing_its_newline_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("l.jsonl");
+        let l = Ledger::open(&p, Fsync::Batch).unwrap();
+        l.append(json!({"type": "a"})).await.unwrap();
+        l.close().unwrap();
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes.pop();
+        std::fs::write(&p, bytes).unwrap();
+        let l = Ledger::open(&p, Fsync::Batch).unwrap();
+        assert_eq!(l.recovered(), Some(0));
+        l.append(json!({"type": "b"})).await.unwrap();
+        l.close().unwrap();
+        assert_eq!(verify(&p).unwrap().records, 2);
     }
 
     #[tokio::test]

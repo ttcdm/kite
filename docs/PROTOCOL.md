@@ -98,8 +98,14 @@ and the first `prev` is 64 zeros. Event types: `started`, `restored`, `stopped`,
 `disconnected`, `accepted` (`{envelope}`, plus `blocking: true` for a blocking request), `refused`, `delivered`, `acked`, `closed`, `withdrawn`, `duplicate`,
 `deadlock_prevented`, `dead_lettered`, `lease_granted`, `lease_denied`, `lease_released`,
 `lease_expired`, `process`, `note`, and `card` (`{action, by, card}` with the full card after the
-change; the board is rebuilt from the last snapshot of each card). `kite up` refuses to start on a ledger whose chain does not
-verify.
+change; the board is rebuilt from the last snapshot of each card), and `recovered`
+(`{bytes_dropped}`, see below). `kite up` refuses to start on a ledger whose chain does not verify.
+
+A crash in the middle of writing a record can leave the last line incomplete. On open, a final
+line without a newline is repaired before verification: if it is a complete record its newline is
+restored (`bytes_dropped: 0`), otherwise it is cut off. The broker then logs `recovered` right after
+`started`. Only that unterminated final line is ever touched; a complete line whose hash does not
+match is tampering, and `kite up` still refuses to start.
 
 On start the broker also rebuilds every mailbox and open request from the ledger and logs
 `restored` (`{messages, requeued, open_requests, lc}`) right after `started`. Messages in flight
