@@ -43,6 +43,8 @@ struct Job {
     root: PathBuf,
     log: PathBuf,
     pidfile: PathBuf,
+    /// Where the agent's token is read from on each start, when tokens are required.
+    tokens: Option<PathBuf>,
     handle: BrokerHandle,
 }
 
@@ -124,6 +126,7 @@ impl Supervisor {
                 root: config.root.clone(),
                 log: log_dir.join(format!("{agent}.log")),
                 pidfile: run_dir.join(format!("{agent}.pid")),
+                tokens: config.broker.require_tokens.then(|| config.tokens_dir()),
                 handle: handle.clone(),
             };
             tasks.push(tokio::spawn(supervise(job, rx.clone())));
@@ -225,17 +228,20 @@ fn spawn(job: &Job, argv: &[String]) -> io::Result<tokio::process::Child> {
     let args: Vec<String> = argv.iter().map(|a| expand(a, &job.agent, &job.spec, &job.socket, &job.root)).collect();
     let log = OpenOptions::new().create(true).append(true).open(&job.log)?;
     let cwd = job.spec.cwd.as_ref().map(|c| job.root.join(c)).unwrap_or_else(|| job.root.clone());
-    Command::new(&args[0])
-        .args(&args[1..])
+    let mut cmd = Command::new(&args[0]);
+    cmd.args(&args[1..])
         .process_group(0)
         .current_dir(cwd)
+        // The agent's own env first, so the identity below cannot be overridden.
+        .envs(&job.spec.env)
         .env("KITE_AGENT", &job.agent)
         .env("KITE_SOCKET", &job.socket)
         .env("KITE_ROOT", &job.root)
-        .envs(&job.spec.env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .kill_on_drop(true)
-        .spawn()
+        // `kite up`'s own token file must not become every agent's identity.
+        .env_remove("KITE_TOKEN_FILE");
+    if let Some(dir) = &job.tokens {
+        // Read fresh on every start, so a rotated token reaches the next restart.
+        cmd.env("KITE_TOKEN", crate::tokens::read(dir, &job.agent)?);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log)).kill_on_drop(true).spawn()
 }

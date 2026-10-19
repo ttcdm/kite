@@ -30,8 +30,21 @@ struct Cli {
     /// Print machine-readable JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// File holding the agent's token, for commands that act as an agent
+    /// (`--as`, `kite mcp`, `kite run`). `KITE_TOKEN` is used if this is not set.
+    #[arg(long, global = true, env = "KITE_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// The token to present: `--token-file` (or `KITE_TOKEN_FILE`), else `KITE_TOKEN`.
+fn token(file: Option<&Path>) -> anyhow::Result<Option<String>> {
+    if let Some(f) = file {
+        let t = std::fs::read_to_string(f).with_context(|| format!("reading token file {}", f.display()))?;
+        return Ok(Some(t.trim().to_string()));
+    }
+    Ok(std::env::var("KITE_TOKEN").ok().filter(|t| !t.is_empty()))
 }
 
 #[derive(Subcommand)]
@@ -159,6 +172,11 @@ enum Cmd {
     Card {
         #[command(subcommand)]
         action: CardCmd,
+    },
+    /// Show or rotate an agent's token (for the operator, not for agents).
+    Token {
+        #[command(subcommand)]
+        action: TokenCmd,
     },
     /// Hook entry points for agent hosts.
     Hook {
@@ -307,6 +325,14 @@ impl CardCmd {
 }
 
 #[derive(Subcommand)]
+enum TokenCmd {
+    /// Print the token (refuses unless stdout is a terminal).
+    Show { agent: String },
+    /// Replace the token; hosts must reconnect with the new one.
+    Rotate { agent: String },
+}
+
+#[derive(Subcommand)]
 enum HookHost {
     /// Claude Code PreToolUse: block edits to files another agent has leased.
     ClaudeCode {
@@ -334,10 +360,19 @@ fn print(json_mode: bool, v: &Value, human: impl FnOnce() -> String) {
     }
 }
 
-async fn agent_client(socket: &Path, agent: &str) -> anyhow::Result<Client> {
+async fn agent_client(socket: &Path, agent: &str, token: Option<&str>) -> anyhow::Result<Client> {
     let c = Client::connect(socket).await?;
-    c.register(agent).await?;
+    c.register_with(agent, token).await?;
     Ok(c)
+}
+
+/// Creates missing tokens (and drops ones for agents no longer declared) when tokens are on.
+fn ensure_tokens(config: &kite_proto::Config) -> anyhow::Result<()> {
+    if config.broker.require_tokens {
+        let agents = config.agents.keys().cloned().collect();
+        kite_core::tokens::ensure(&config.tokens_dir(), &agents).context("creating agent tokens")?;
+    }
+    Ok(())
 }
 
 fn kite_exe() -> String {
@@ -351,6 +386,7 @@ async fn up(paths: &paths::Paths, config: kite_proto::Config, no_supervise: bool
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
+    ensure_tokens(&config)?;
     let config = Arc::new(config);
     // Claim the socket before touching the ledger: a second `kite up` on a live
     // project must fail without writing anything.
@@ -410,14 +446,19 @@ fn init_here(force: bool) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir.join(".kite"), std::fs::Permissions::from_mode(0o700))?;
     }
+    ensure_tokens(&parsed)?;
     for agent in parsed.agents.keys() {
-        let body = serde_json::to_string_pretty(&init::mcp_json(&kite_exe(), agent, &config))?;
+        let token_file = kite_core::tokens::path(&parsed.tokens_dir(), agent);
+        let body = serde_json::to_string_pretty(&init::mcp_json(&kite_exe(), agent, &config, &token_file))?;
         std::fs::write(mcp_dir.join(format!("{agent}.json")), body)?;
     }
     println!("wrote {} and .kite/mcp/<agent>.json for {} agents\n", written.join(", "), parsed.agents.len());
     println!("Next: `kite up` in one terminal, then connect each agent host.\n");
     let first = parsed.agents.keys().next().map_or("lead", |s| s.as_str());
-    print!("{}", init::connect_text(&kite_exe(), first, &config));
+    print!(
+        "{}",
+        init::connect_text(&kite_exe(), first, &config, &kite_core::tokens::path(&parsed.tokens_dir(), first))
+    );
     Ok(())
 }
 
@@ -451,6 +492,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let (paths, config) = paths::find(cli.config.as_deref())?;
+    let tok = token(cli.token_file.as_deref())?;
     match cli.cmd {
         Cmd::Init { .. } => unreachable!("handled above"),
         Cmd::Trace { agent, verify } => trace(&config, agent.as_deref(), verify, json_mode)?,
@@ -458,8 +500,10 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if !config.agents.contains_key(&agent) {
                 bail!("{agent:?} is not declared under [agents] in {}", paths.config.display());
             }
-            let v = init::mcp_json(&kite_exe(), &agent, &paths.config);
-            print(json_mode, &v, || init::connect_text(&kite_exe(), &agent, &paths.config));
+            ensure_tokens(&config)?;
+            let token_file = kite_core::tokens::path(&config.tokens_dir(), &agent);
+            let v = init::mcp_json(&kite_exe(), &agent, &paths.config, &token_file);
+            print(json_mode, &v, || init::connect_text(&kite_exe(), &agent, &paths.config, &token_file));
         }
         Cmd::Up { no_supervise } => up(&paths, config, no_supervise).await?,
         Cmd::Status { agent, watch } => {
@@ -480,11 +524,11 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
         }
         Cmd::Contracts { agent } => {
-            let c = agent_client(&paths.socket, &agent).await?;
+            let c = agent_client(&paths.socket, &agent, tok.as_deref()).await?;
             println!("{}", serde_json::to_string_pretty(&c.contracts().await?)?);
         }
         Cmd::Send { agent, to, schema, payload: p, request, wait, timeout_ms, id } => {
-            let c = agent_client(&paths.socket, &agent).await?;
+            let c = agent_client(&paths.socket, &agent, tok.as_deref()).await?;
             let draft = Draft {
                 id,
                 to,
@@ -511,7 +555,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             });
         }
         Cmd::Recv { agent, wait, max, keep } => {
-            let c = agent_client(&paths.socket, &agent).await?;
+            let c = agent_client(&paths.socket, &agent, tok.as_deref()).await?;
             let got = c.recv(wait.saturating_mul(1000), max).await?;
             if !keep && !got.messages.is_empty() {
                 c.ack(got.messages.iter().map(|m| m.id).collect()).await?;
@@ -529,7 +573,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             });
         }
         Cmd::Respond { agent, request, result, error_code, error_message } => {
-            let c = agent_client(&paths.socket, &agent).await?;
+            let c = agent_client(&paths.socket, &agent, tok.as_deref()).await?;
             let v = match (result, error_code, error_message) {
                 (Some(r), None, None) => c.respond(request, payload(&r)?).await?,
                 (None, Some(code), Some(message)) => {
@@ -540,12 +584,12 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             print(json_mode, &v, || format!("answered {request}\n"));
         }
         Cmd::Cancel { agent, request } => {
-            let c = agent_client(&paths.socket, &agent).await?;
+            let c = agent_client(&paths.socket, &agent, tok.as_deref()).await?;
             let v = c.cancel(request).await?;
             print(json_mode, &v, || format!("cancelled {request}\n"));
         }
         Cmd::Lease { agent, resource, ttl, hold } => {
-            let c = agent_client(&paths.socket, &agent).await?;
+            let c = agent_client(&paths.socket, &agent, tok.as_deref()).await?;
             let key = paths::resource_key(&paths.root, &resource);
             let l = c.lease(&key, ttl.saturating_mul(1000)).await?;
             let v = serde_json::to_value(&l)?;
@@ -569,7 +613,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Cmd::Run { plan } => {
             let text = std::fs::read_to_string(&plan).with_context(|| format!("reading {}", plan.display()))?;
             let plan = Plan::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", plan.display()))?;
-            let c = Arc::new(agent_client(&paths.socket, &plan.as_agent).await?);
+            let c = Arc::new(agent_client(&paths.socket, &plan.as_agent, tok.as_deref()).await?);
             let report = runner::run(c, &plan).await.map_err(anyhow::Error::msg)?;
             let v = serde_json::to_value(&report)?;
             print(json_mode, &v, || {
@@ -605,14 +649,37 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
         Cmd::Card { action } => {
             let c = match action.agent() {
-                Some(a) => agent_client(&paths.socket, a).await?,
+                Some(a) => agent_client(&paths.socket, a, tok.as_deref()).await?,
                 None => Client::connect(&paths.socket).await?,
             };
             let v = c.card(action.into_op()).await?;
             let card: Card = serde_json::from_value(v.clone())?;
             print(json_mode, &v, || show::card(&card));
         }
-        Cmd::Mcp { agent } => mcp::serve(agent, paths).await?,
+        Cmd::Mcp { agent } => mcp::serve(agent, token(cli.token_file.as_deref())?, paths).await?,
+        Cmd::Token { action } => {
+            let (agent, rotate) = match action {
+                TokenCmd::Show { agent } => (agent, false),
+                TokenCmd::Rotate { agent } => (agent, true),
+            };
+            if !config.agents.contains_key(&agent) {
+                bail!("{agent:?} is not declared under [agents] in {}", paths.config.display());
+            }
+            ensure_tokens(&config)?;
+            let dir = config.tokens_dir();
+            if rotate {
+                kite_core::tokens::rotate(&dir, &agent)?;
+                println!("rotated {agent}'s token; connections already registered keep working until they reconnect");
+            } else {
+                if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                    bail!(
+                        "refusing to write {agent}'s token into a pipe or file; it is in {} if you need it",
+                        kite_core::tokens::path(&dir, &agent).display()
+                    );
+                }
+                println!("{}", kite_core::tokens::read(&dir, &agent)?);
+            }
+        }
         Cmd::Hook { host: HookHost::ClaudeCode { agent, strict } } => {
             return Ok(ExitCode::from(hook::run(&paths, agent.as_deref(), strict).await as u8));
         }

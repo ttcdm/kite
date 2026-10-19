@@ -540,7 +540,9 @@ impl Broker {
                 let by = by.unwrap_or_default().to_string();
                 self.card_op(&by, card, conn, &mut reply)
             }
-            (None, Op::Register { agent, protocol }) => Some(self.register(conn, &agent, &protocol)),
+            (None, Op::Register { agent, protocol, token }) => {
+                Some(self.register(conn, &agent, &protocol, token.as_ref()))
+            }
             (Some(_), Op::Register { .. }) => {
                 Some(err(ErrorCode::AlreadyRegistered, "this connection already registered an agent"))
             }
@@ -591,12 +593,28 @@ impl Broker {
         }
     }
 
-    fn register(&mut self, conn: ConnId, agent: &str, protocol: &str) -> KiteResult<Value> {
+    fn register(&mut self, conn: ConnId, agent: &str, protocol: &str, token: Option<&Secret>) -> KiteResult<Value> {
         if protocol != PROTOCOL {
             return err(
                 ErrorCode::ProtocolMismatch,
                 format!("the broker speaks {PROTOCOL}; the client sent {protocol:?}"),
             );
+        }
+        // Checked before the agent's connection state, so a wrong token learns nothing about it.
+        if self.config.broker.require_tokens && self.slots.contains_key(agent) {
+            let expected = crate::tokens::read(&self.config.tokens_dir(), agent);
+            let ok = match (token, expected) {
+                (Some(t), Ok(e)) => crate::tokens::matches(t.expose(), &e),
+                _ => false,
+            };
+            if !ok {
+                return err(
+                    ErrorCode::Unauthorized,
+                    format!(
+                        "{agent} needs its token: run `kite connect {agent}` and start the host with the --token-file it prints"
+                    ),
+                );
+            }
         }
         let Some(slot) = self.slots.get_mut(agent) else {
             let declared: Vec<&String> = self.slots.keys().collect();

@@ -51,6 +51,9 @@ pub struct BrokerSettings {
     /// Connections the broker accepts at once; more are refused with `busy`.
     #[serde(default = "d_max_connections")]
     pub max_connections: usize,
+    /// Agents must present their token (`.kite/tokens/<agent>`) to register.
+    #[serde(default = "d_true")]
+    pub require_tokens: bool,
 }
 
 fn d_capacity() -> usize {
@@ -90,6 +93,7 @@ impl Default for BrokerSettings {
             socket: d_socket(),
             ledger: d_ledger(),
             max_connections: d_max_connections(),
+            require_tokens: true,
         }
     }
 }
@@ -234,6 +238,10 @@ pub struct Config {
     pub root: PathBuf,
 }
 
+/// Environment variables that decide an agent's identity. Kite sets the first four
+/// for the agents it launches and clears the last; kite.toml may not set any of them.
+pub const IDENTITY_ENV: [&str; 5] = ["KITE_AGENT", "KITE_SOCKET", "KITE_ROOT", "KITE_TOKEN", "KITE_TOKEN_FILE"];
+
 /// The name the broker uses as `from` on messages it originates.
 pub const BROKER_AGENT: &str = "kite";
 
@@ -304,6 +312,9 @@ impl Config {
             {
                 return Err(format!("agents.{name}.command is empty"));
             }
+            if let Some(key) = a.env.keys().find(|k| IDENTITY_ENV.contains(&k.as_str())) {
+                return Err(format!("agents.{name}.env: {key} decides who the agent is; kite sets it"));
+            }
         }
 
         let mut routes: HashMap<(String, String), BTreeSet<SchemaRef>> = HashMap::new();
@@ -355,6 +366,11 @@ impl Config {
             return Err(format!("board.mainline: {m:?} must be a git ref name, not empty or starting with -"));
         }
         Ok(Config { broker, registry, agents: raw.agents, routes, board: raw.board, root: root.to_path_buf() })
+    }
+
+    /// Where each agent's token lives: `<root>/.kite/tokens/<agent>`.
+    pub fn tokens_dir(&self) -> PathBuf {
+        self.root.join(".kite/tokens")
     }
 
     pub fn allowed(&self, from: &str, to: &str, schema: &SchemaRef) -> bool {
@@ -414,6 +430,14 @@ mod tests {
     fn rejects_unknown_keys() {
         let bad = format!("{BASE}\n[broker]\nmailbox_capacty = 3\n");
         assert!(Config::parse(&bad, Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn agents_cannot_set_their_own_identity() {
+        let with = |key: &str| BASE.replace("[agents.worker]", &format!("[agents.worker]\nenv = {{ {key} = \"x\" }}"));
+        assert!(Config::parse(&with("KITE_TOKEN_FILE"), Path::new("/")).unwrap_err().contains("decides who"));
+        assert!(Config::parse(&with("KITE_AGENT"), Path::new("/")).is_err());
+        assert!(Config::parse(&with("KITE_BIN"), Path::new("/")).is_ok(), "other KITE_ names are the user's");
     }
 
     #[test]

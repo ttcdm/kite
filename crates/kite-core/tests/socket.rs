@@ -16,6 +16,9 @@ use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
 const CONFIG: &str = r#"
+[broker]
+require_tokens = false
+
 [schemas."work@1"]
 kind = "request"
 response = "work.done@1"

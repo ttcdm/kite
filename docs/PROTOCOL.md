@@ -16,7 +16,7 @@ Frames longer than 1 MiB are refused and the connection closed.
 
 | op | Needs `register` | Fields | Answer |
 |---|---|---|---|
-| `register` | – | `agent`, `protocol` (`"kite/1"`) | `{agent, protocol, inbox}` |
+| `register` | – | `agent`, `protocol` (`"kite/1"`), `token` (required unless `require_tokens = false`) | `{agent, protocol, inbox}` |
 | `send` | yes | `draft` | `{id, kind, seq, lc, deadline_ms?, duplicate}` |
 | `recv` | yes | `wait_ms` (≤ 300000), `max` (1–256) | `{messages, remaining}` |
 | `ack` | yes | `ids` | `{acked, unknown}` |
@@ -118,7 +118,7 @@ restored.
 ## Error codes
 
 `invalid_frame`, `protocol_mismatch`, `not_registered`, `already_registered`, `already_connected`,
-`unknown_agent`, `unknown_schema`, `route_denied`, `schema_violation`, `wrong_kind`, `busy`,
+`unknown_agent`, `unauthorized`, `unknown_schema`, `route_denied`, `schema_violation`, `wrong_kind`, `busy`,
 `deadlock`, `timeout`, `peer_down`, `cancelled`, `no_such_request`, `not_your_request`,
 `wait_in_progress`, `lease_conflict`, `lease_not_held`, `no_such_card`, `transition_refused`,
 `not_permitted`, `card_conflict`, `invalid_argument`, `shutting_down`,

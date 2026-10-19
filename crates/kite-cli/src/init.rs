@@ -166,12 +166,15 @@ pub fn write(dir: &Path, force: bool) -> anyhow::Result<Vec<String>> {
 }
 
 /// The MCP server entry for one agent, in the shape most hosts share.
-pub fn mcp_json(kite: &str, agent: &str, config: &Path) -> serde_json::Value {
+/// The MCP server entry for one agent, in the shape most hosts share. The token
+/// is passed as a file path, never inline, because these files get committed.
+pub fn mcp_json(kite: &str, agent: &str, config: &Path, token_file: &Path) -> serde_json::Value {
     serde_json::json!({
         "mcpServers": {
             "kite": {
                 "command": kite,
-                "args": ["mcp", "--agent", agent, "--config", config.display().to_string()]
+                "args": ["mcp", "--agent", agent, "--config", config.display().to_string(),
+                         "--token-file", token_file.display().to_string()]
             }
         }
     })
@@ -179,16 +182,17 @@ pub fn mcp_json(kite: &str, agent: &str, config: &Path) -> serde_json::Value {
 
 /// How to plug `agent` into common hosts. These follow each host's documented
 /// MCP configuration format; check them against the version you run.
-pub fn connect_text(kite: &str, agent: &str, config: &Path) -> String {
+pub fn connect_text(kite: &str, agent: &str, config: &Path, token_file: &Path) -> String {
     let c = config.display();
-    let json = serde_json::to_string_pretty(&mcp_json(kite, agent, config)).expect("serializes");
+    let t = token_file.display();
+    let json = serde_json::to_string_pretty(&mcp_json(kite, agent, config, token_file)).expect("serializes");
     format!(
         "Connect a host as agent \"{agent}\":\n\n\
-         Claude Code\n  claude mcp add kite -- {kite} mcp --agent {agent} --config {c}\n\n\
+         Claude Code (local scope keeps it out of the project's .mcp.json)\n  claude mcp add kite --scope local -- {kite} mcp --agent {agent} --config {c} --token-file {t}\n\n\
          Hosts with a JSON mcpServers file (Claude Code .mcp.json, Cursor .cursor/mcp.json,\n\
          Gemini CLI settings.json, Windsurf, Cline):\n{json}\n\n\
-         Codex CLI (~/.codex/config.toml)\n  [mcp_servers.kite]\n  command = \"{kite}\"\n  args = [\"mcp\", \"--agent\", \"{agent}\", \"--config\", \"{c}\"]\n\n\
-         Any agent that can run shell commands\n  {kite} recv --as {agent} --wait 20\n  {kite} respond --as {agent} --request <id> --result '{{...}}'\n\n\
+         Codex CLI (~/.codex/config.toml)\n  [mcp_servers.kite]\n  command = \"{kite}\"\n  args = [\"mcp\", \"--agent\", \"{agent}\", \"--config\", \"{c}\", \"--token-file\", \"{t}\"]\n\n\
+         Any agent that can run shell commands (with KITE_TOKEN_FILE={t} in its environment)\n  {kite} recv --as {agent} --wait 20\n  {kite} respond --as {agent} --request <id> --result '{{...}}'\n\n\
          Claude Code lease guard (blocks edits to files another agent leased), in .claude/settings.json:\n  \
          {{\"hooks\": {{\"PreToolUse\": [{{\"matcher\": \"Edit|Write|MultiEdit|NotebookEdit\",\n  \
          \"hooks\": [{{\"type\": \"command\", \"command\": \"{kite} hook claude-code --agent {agent} --config {c}\"}}]}}]}}}}\n"

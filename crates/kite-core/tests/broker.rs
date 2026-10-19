@@ -13,6 +13,7 @@ use tempfile::TempDir;
 const CONFIG: &str = r#"
 [broker]
 mailbox_capacity = 4
+require_tokens = false
 max_redeliveries = 1
 
 [schemas."task.do@1"]
@@ -73,7 +74,7 @@ fn start_with(dir: TempDir, config: &str) -> Env {
 impl Env {
     async fn agent(&self, name: &str) -> ConnId {
         let c = self.h.connect();
-        let r = self.h.call(c, Op::Register { agent: name.into(), protocol: PROTOCOL.into() }).await;
+        let r = self.h.call(c, Op::Register { agent: name.into(), protocol: PROTOCOL.into(), token: None }).await;
         r.result.unwrap();
         c
     }
@@ -134,14 +135,14 @@ fn answer(id: ulid::Ulid, result: Value) -> Op {
 async fn registration_is_strict() {
     let e = start();
     let c = e.h.connect();
-    let r = e.h.call(c, Op::Register { agent: "ghost".into(), protocol: PROTOCOL.into() }).await;
+    let r = e.h.call(c, Op::Register { agent: "ghost".into(), protocol: PROTOCOL.into(), token: None }).await;
     assert_eq!(code(r), ErrorCode::UnknownAgent);
-    let r = e.h.call(c, Op::Register { agent: "lead".into(), protocol: "kite/0".into() }).await;
+    let r = e.h.call(c, Op::Register { agent: "lead".into(), protocol: "kite/0".into(), token: None }).await;
     assert_eq!(code(r), ErrorCode::ProtocolMismatch);
     assert_eq!(code(e.h.call(c, recv(0)).await), ErrorCode::NotRegistered);
     e.agent("lead").await;
     let c2 = e.h.connect();
-    let r = e.h.call(c2, Op::Register { agent: "lead".into(), protocol: PROTOCOL.into() }).await;
+    let r = e.h.call(c2, Op::Register { agent: "lead".into(), protocol: PROTOCOL.into(), token: None }).await;
     assert_eq!(code(r), ErrorCode::AlreadyConnected);
     // Read-only operations work without registering.
     let s: StatusOk = ok(e.h.call(c2, Op::Status { agent: None }).await);
@@ -739,4 +740,44 @@ async fn a_torn_ledger_tail_is_repaired_and_recorded_on_the_next_start() {
     let events = e.stop().await;
     let recovered = events.iter().find(|ev| ev["type"] == "recovered").expect("a recovered event");
     assert_eq!(recovered["bytes_dropped"], torn.len());
+}
+
+#[tokio::test]
+async fn registering_needs_the_agents_own_token() {
+    use kite_core::tokens;
+    let dir = tempfile::tempdir().unwrap();
+    let text = CONFIG.replace("require_tokens = false", "require_tokens = true");
+    let config = Arc::new(Config::parse(&text, dir.path()).unwrap());
+    let tokens_dir = config.tokens_dir();
+    tokens::ensure(&tokens_dir, &config.agents.keys().cloned().collect()).unwrap();
+    let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync).unwrap();
+    let (h, task) = Broker::spawn(config, ledger);
+    let e = Env { h, dir, task };
+    let reg = |agent: &str, token: Option<&str>| Op::Register {
+        agent: agent.into(),
+        protocol: PROTOCOL.into(),
+        token: token.map(Secret::new),
+    };
+    let lead_token = tokens::read(&tokens_dir, "lead").unwrap();
+    let worker_token = tokens::read(&tokens_dir, "worker").unwrap();
+
+    let c = e.h.connect();
+    assert_eq!(code(e.h.call(c, reg("lead", None)).await), ErrorCode::Unauthorized);
+    assert_eq!(code(e.h.call(c, reg("lead", Some(&worker_token))).await), ErrorCode::Unauthorized);
+    let ok: RegisterOk = ok(e.h.call(c, reg("lead", Some(&lead_token))).await);
+    assert_eq!(ok.agent, "lead");
+
+    // A rotated token takes effect on the next registration.
+    tokens::rotate(&tokens_dir, "worker").unwrap();
+    let w = e.h.connect();
+    assert_eq!(code(e.h.call(w, reg("worker", Some(&worker_token))).await), ErrorCode::Unauthorized);
+    let fresh = tokens::read(&tokens_dir, "worker").unwrap();
+    e.h.call(w, reg("worker", Some(&fresh))).await.result.unwrap();
+
+    // The token never shows up when the operation is formatted or audited.
+    assert!(!format!("{:?}", reg("lead", Some(&lead_token))).contains(&lead_token));
+    let events = e.stop().await;
+    let ledger = serde_json::to_string(&events).unwrap();
+    assert!(!ledger.contains(&lead_token) && !ledger.contains(&fresh));
+    assert!(events.iter().any(|ev| ev["type"] == "refused" && ev["code"] == "unauthorized"));
 }

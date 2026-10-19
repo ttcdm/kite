@@ -31,11 +31,11 @@ kite up
 ```
 
 `kite init` writes a starter team (`lead`, `coder`, `reviewer`) to `kite.toml`, its schemas to
-`schemas/`, and one MCP config per agent to `.kite/mcp/<agent>.json`. It also prints how to plug
-each host in. For Claude Code, for example:
+`schemas/`, a token per agent to `.kite/tokens/<agent>`, and one MCP config per agent to
+`.kite/mcp/<agent>.json`. It also prints how to plug each host in. For Claude Code, for example:
 
 ```bash
-claude mcp add kite -- kite mcp --agent coder
+claude mcp add kite --scope local -- kite mcp --agent coder --token-file .kite/tokens/coder
 ```
 
 `kite connect <agent>` prints the snippets for one agent: Claude Code, hosts with a JSON
@@ -155,10 +155,11 @@ server to wake an agent. An agent learns of new mail on its next tool call or `k
 
 ## Shell agents
 
-Anything that can run a command can take part:
+Anything that can run a command can take part. It needs its token, from `--token-file`,
+`KITE_TOKEN_FILE` or `KITE_TOKEN` (agents launched by `kite up` get `KITE_TOKEN` automatically):
 
 ```bash
-kite recv --as coder --wait 20
+KITE_TOKEN_FILE=.kite/tokens/coder kite recv --as coder --wait 20
 ```
 
 ```bash
@@ -217,6 +218,7 @@ edit and prints a warning. This hook is Claude Code specific; other hosts rely o
 | `max_lease_ms` | 3600000 | longest lease |
 | `max_connections` | 256 | connections open at once; more are refused with `busy` |
 | `fsync` | `"batch"` | `"always"` syncs the ledger after every record |
+| `require_tokens` | `true` | agents must present their token to register |
 | `socket` / `ledger` | `.kite/kite.sock` / `.kite/ledger.jsonl` | paths, relative to `kite.toml` |
 
 The socket's directory is kept private: `kite up` restricts it to its owner (0700) and refuses a
@@ -234,6 +236,20 @@ the last moments of activity; with `fsync = "always"` every record is synced bef
 written. A crash in the middle of a write leaves at most one torn final record, which the next
 start repairs and records as `recovered`.
 
+## Security
+
+Each declared agent has a random 256-bit token in `.kite/tokens/<agent>` (owner-only). An agent
+registers by presenting it, so `kite send --as lead` from an agent that only knows lead's name is
+refused with `unauthorized`. Hosts get the token by path (`--token-file`), never inline, so
+committed MCP configs do not contain it, and `kite init` writes `.kite/.gitignore` so nothing in
+`.kite/` is committed. Agents launched by `kite up` receive `KITE_TOKEN`; `kite.toml` cannot set
+`KITE_AGENT`, `KITE_SOCKET`, `KITE_ROOT`, `KITE_TOKEN` or `KITE_TOKEN_FILE` for an agent.
+
+Reading the board, status and lease checks need no token. `kite token rotate <agent>` replaces a
+token (hosts reconnect with the new one); `kite token show <agent>` prints it only to a terminal.
+Tokens are never written to the ledger or to logs. Set `[broker] require_tokens = false` only for
+throwaway setups. What tokens do and do not protect against is in [SECURITY.md](SECURITY.md).
+
 ## Limits
 
 - One machine, one broker, Unix sockets only (macOS and Linux). Socket paths are limited to about
@@ -243,8 +259,9 @@ start repairs and records as `recovered`.
   acknowledged come back with `redelivered` incremented, as after a disconnect, and a deadline
   that passed while the broker was down answers `timeout` right after start. Leases do not
   survive a restart. Every start reads the whole ledger; nothing compacts it.
-- Identity is the agent name on a socket only the owner can open. It keeps agents apart; it is
-  not a defence against another process running as the same user.
+- Tokens keep agents from acting as each other by passing a name. They are files your user can
+  read, so they are not a defence against a process running as you that reads them on purpose
+  (see [SECURITY.md](SECURITY.md)).
 - Leases are advisory except where a hook enforces them (the Claude Code hook above).
 - Responses are checked against their schema; whether the work they describe was done is not.
 - The adapter commands in `kite init`'s comments are examples and have not been tested against

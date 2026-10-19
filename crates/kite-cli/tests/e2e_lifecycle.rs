@@ -113,7 +113,8 @@ timeout_ms = 20000
     })
     .await;
 
-    let report = p.json(&["run", "plan.toml"]);
+    let lead_token = p.token_file("lead").display().to_string();
+    let report = p.json(&["run", "plan.toml", "--token-file", &lead_token]);
     assert_eq!(report["ok"], true, "{report}");
     assert_eq!(report["tasks"]["second"]["result"]["summary"], json!("did did parse the flag and document it"));
 

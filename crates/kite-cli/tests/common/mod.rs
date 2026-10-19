@@ -63,9 +63,34 @@ impl Project {
         std::fs::write(p, body).unwrap();
     }
 
-    /// Runs `kite` in the project.
+    /// The file holding `agent`'s token.
+    pub fn token_file(&self, agent: &str) -> PathBuf {
+        self.path(&format!(".kite/tokens/{agent}"))
+    }
+
+    /// Runs `kite` in the project. A command acting `--as` an agent gets that
+    /// agent's `--token-file`, as a configured host would.
     pub fn kite(&self, args: &[&str]) -> Output {
-        StdCommand::new(KITE).args(args).current_dir(&self.dir).env_remove("KITE_AGENT").output().unwrap()
+        let mut all: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        if let Some(i) = args.iter().position(|a| *a == "--as")
+            && let Some(agent) = args.get(i + 1)
+        {
+            all.push("--token-file".into());
+            all.push(self.token_file(agent).display().to_string());
+        }
+        self.kite_bare(&all.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// Runs `kite` exactly as given, with no token added and none inherited.
+    pub fn kite_bare(&self, args: &[&str]) -> Output {
+        StdCommand::new(KITE)
+            .args(args)
+            .current_dir(&self.dir)
+            .env_remove("KITE_AGENT")
+            .env_remove("KITE_TOKEN")
+            .env_remove("KITE_TOKEN_FILE")
+            .output()
+            .unwrap()
     }
 
     /// Runs `kite` and fails the test, with its stderr, unless it exits 0. Returns stdout.
@@ -161,9 +186,14 @@ impl Project {
         }
     }
 
-    /// An MCP session for `agent`, already initialized.
+    /// An MCP session for `agent` with its token, already initialized.
     pub async fn mcp(&self, agent: &str) -> Mcp {
-        let mut m = Mcp::start(&self.dir, agent);
+        self.mcp_with(agent, &["--token-file", &self.token_file(agent).display().to_string()]).await
+    }
+
+    /// An MCP session for `agent` started with exactly `extra` arguments, already initialized.
+    pub async fn mcp_with(&self, agent: &str, extra: &[&str]) -> Mcp {
+        let mut m = Mcp::start(&self.dir, agent, extra);
         let init = m
             .rpc(
                 "initialize",
@@ -245,10 +275,13 @@ pub struct Mcp {
 }
 
 impl Mcp {
-    fn start(dir: &Path, agent: &str) -> Mcp {
+    fn start(dir: &Path, agent: &str, extra: &[&str]) -> Mcp {
         let mut child = Command::new(KITE)
             .args(["mcp", "--agent", agent])
+            .args(extra)
             .current_dir(dir)
+            .env_remove("KITE_TOKEN")
+            .env_remove("KITE_TOKEN_FILE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

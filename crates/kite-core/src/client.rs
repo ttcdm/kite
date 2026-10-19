@@ -97,7 +97,13 @@ impl Client {
     }
 
     pub async fn register(&self, agent: &str) -> KiteResult<RegisterOk> {
-        self.call_as(Op::Register { agent: agent.into(), protocol: PROTOCOL.into() }).await
+        self.register_with(agent, None).await
+    }
+
+    /// Registers as `agent`, presenting its token.
+    pub async fn register_with(&self, agent: &str, token: Option<&str>) -> KiteResult<RegisterOk> {
+        let token = token.map(Secret::new);
+        self.call_as(Op::Register { agent: agent.into(), protocol: PROTOCOL.into(), token }).await
     }
 
     pub async fn send(&self, draft: Draft) -> KiteResult<SendOk> {

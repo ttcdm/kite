@@ -19,6 +19,8 @@ pub enum ErrorCode {
     AlreadyConnected,
     /// The agent name is not declared in kite.toml.
     UnknownAgent,
+    /// The connection did not present the agent's token.
+    Unauthorized,
     /// The schema reference is not declared in kite.toml.
     UnknownSchema,
     /// No route allows this sender to send this schema to this recipient.
@@ -73,6 +75,7 @@ impl ErrorCode {
             ErrorCode::AlreadyRegistered => "already_registered",
             ErrorCode::AlreadyConnected => "already_connected",
             ErrorCode::UnknownAgent => "unknown_agent",
+            ErrorCode::Unauthorized => "unauthorized",
             ErrorCode::UnknownSchema => "unknown_schema",
             ErrorCode::RouteDenied => "route_denied",
             ErrorCode::SchemaViolation => "schema_violation",

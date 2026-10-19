@@ -32,6 +32,7 @@ detail object saying exactly what to fix.";
 
 struct State {
     agent: Option<String>,
+    token: Option<String>,
     paths: Paths,
     client: Mutex<Option<Arc<Client>>>,
 }
@@ -53,7 +54,7 @@ impl State {
         let c = Client::connect(&self.paths.socket)
             .await
             .map_err(|e| KiteError::new(ErrorCode::ShuttingDown, e.to_string()))?;
-        c.register(agent).await?;
+        c.register_with(agent, self.token.as_deref()).await?;
         let c = Arc::new(c);
         *slot = Some(c.clone());
         Ok(c)
@@ -395,8 +396,8 @@ async fn handle(state: &State, msg: Value) -> Option<Value> {
 
 /// Serves MCP on stdin/stdout until stdin closes. Requests run concurrently,
 /// so a host's parallel tool calls do not queue behind a long recv.
-pub async fn serve(agent: Option<String>, paths: Paths) -> anyhow::Result<()> {
-    let state = Arc::new(State { agent, paths, client: Mutex::new(None) });
+pub async fn serve(agent: Option<String>, token: Option<String>, paths: Paths) -> anyhow::Result<()> {
+    let state = Arc::new(State { agent, token, paths, client: Mutex::new(None) });
     let (out, mut out_rx) = mpsc::channel::<Value>(64);
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();

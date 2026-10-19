@@ -28,6 +28,9 @@ pub enum Op {
     Register {
         agent: String,
         protocol: String,
+        /// The agent's token, required unless `[broker] require_tokens = false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<Secret>,
     },
     /// Submits a request or event.
     Send {
@@ -87,6 +90,28 @@ pub enum Op {
     Card {
         card: crate::board::CardOp,
     },
+}
+
+/// A credential. Its `Debug` output is redacted, so it never reaches a log line
+/// or an error message by way of formatting the operation that carries it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(s: impl Into<String>) -> Secret {
+        Secret(s.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
 }
 
 fn default_max() -> usize {

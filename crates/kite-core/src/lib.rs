@@ -10,6 +10,7 @@ pub mod restore;
 pub mod runner;
 pub mod server;
 pub mod supervisor;
+pub mod tokens;
 pub mod vcs;
 pub mod waits;
 

@@ -12,6 +12,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 const CONFIG: &str = r#"
+[broker]
+require_tokens = false
+
 [agents.lead]
 [agents.coder]
 [agents.reviewer]
@@ -72,7 +75,11 @@ fn start_with(extra: &str, vcs: Option<Arc<dyn Vcs>>) -> Env {
 impl Env {
     async fn agent(&self, name: &str) -> ConnId {
         let c = self.h.connect();
-        self.h.call(c, Op::Register { agent: name.into(), protocol: PROTOCOL.into() }).await.result.unwrap();
+        self.h
+            .call(c, Op::Register { agent: name.into(), protocol: PROTOCOL.into(), token: None })
+            .await
+            .result
+            .unwrap();
         c
     }
 
