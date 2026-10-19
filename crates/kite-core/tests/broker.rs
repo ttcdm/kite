@@ -781,3 +781,57 @@ async fn registering_needs_the_agents_own_token() {
     assert!(!ledger.contains(&lead_token) && !ledger.contains(&fresh));
     assert!(events.iter().any(|ev| ev["type"] == "refused" && ev["code"] == "unauthorized"));
 }
+
+/// The safety argument for ledger compaction: a snapshot taken just before a
+/// `started`, plus every later event, restores exactly what replaying the
+/// whole history would. Checked at every cut point of a real two-run history.
+#[tokio::test]
+async fn a_snapshot_plus_later_events_equals_the_whole_history() {
+    use kite_core::restore::Fold;
+    use kite_proto::board::*;
+
+    // A history with in-flight, acknowledged and answered messages, a disconnect, and cards.
+    let e = start();
+    let lead = e.agent("lead").await;
+    let worker = e.agent("worker").await;
+    for i in 0..3 {
+        e.h.call(lead, send(draft("worker", "task.do@1", json!({"goal": format!("g{i}")})))).await.result.unwrap();
+    }
+    e.h.call(worker, send(draft("lead", "note@1", json!({"n": 1})))).await.result.unwrap();
+    let got: RecvOk = ok(e.h.call(worker, Op::Recv { wait_ms: 0, max: 2 }).await);
+    e.h.call(worker, answer(got.messages[0].id, json!({"ok": true}))).await.result.unwrap();
+    let card = CardDraft {
+        title: "t".into(),
+        acceptance: vec!["a".into()],
+        merge_gate: Some("m".into()),
+        ..Default::default()
+    };
+    e.h.call(lead, Op::Card { card: CardOp::Create { card } }).await.result.unwrap();
+    e.h.disconnect(worker).await;
+    let (dir, _) = e.stop_keep().await;
+    let e = start_in(dir);
+    let worker = e.agent("worker").await;
+    let got: RecvOk = ok(e.h.call(worker, recv(0)).await);
+    e.h.call(worker, Op::Ack { ids: vec![got.messages[0].id] }).await.result.unwrap();
+    let events = e.stop().await;
+    assert!(events.len() > 10, "a history worth checking, got {} events", events.len());
+
+    let fold = |evs: &[Value]| {
+        let mut f = Fold::default();
+        evs.iter().for_each(|e| f.apply(e));
+        f
+    };
+    let started = json!({ "type": "started" });
+    for k in 0..=events.len() {
+        let mut whole = events[..k].to_vec();
+        whole.push(started.clone());
+        whole.extend_from_slice(&events[k..]);
+        let expected = fold(&whole).finish();
+
+        let snapshot = serde_json::to_value(fold(&events[..k]).compacted()).unwrap();
+        let mut seeded: Fold = serde_json::from_value(snapshot).unwrap();
+        seeded.apply(&started);
+        events[k..].iter().for_each(|e| seeded.apply(e));
+        assert_eq!(seeded.finish(), expected, "snapshot at event {k} diverges");
+    }
+}

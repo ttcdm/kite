@@ -326,7 +326,7 @@ impl Broker {
         // Messages, open requests and the board are rebuilt from the ledger.
         let events = crate::ledger::read_events(ledger.path()).unwrap_or_default();
         let restored = crate::restore::replay(&events);
-        let cards = crate::board::replay(events);
+        let cards = restored.cards.clone();
         let board =
             Board::new(config.board.clone(), config.agents.keys().cloned().collect(), config.root.clone(), cards);
         let broker = Broker {
