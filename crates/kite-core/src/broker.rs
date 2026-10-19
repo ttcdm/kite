@@ -148,6 +148,12 @@ struct Lease {
     generation: u64,
 }
 
+impl Lease {
+    fn info(&self, resource: &str) -> LeaseInfo {
+        LeaseInfo { resource: resource.to_string(), holder: self.holder.clone(), expires_at_ms: self.expires_at_ms }
+    }
+}
+
 /// A map that forgets its oldest entries past a fixed size.
 struct BoundedMap<V> {
     map: HashMap<Ulid, V>,
@@ -859,8 +865,7 @@ impl Broker {
         if let Some(l) = self.leases.get(&resource)
             && l.holder != me
         {
-            let info =
-                LeaseInfo { resource: resource.clone(), holder: l.holder.clone(), expires_at_ms: l.expires_at_ms };
+            let info = l.info(&resource);
             self.log(json!({ "type": "lease_denied", "agent": me, "resource": resource, "holder": l.holder }));
             return Err(KiteError::new(ErrorCode::LeaseConflict, format!("{resource} is leased by {}", info.holder))
                 .with_detail(to_value(&info)));
@@ -891,20 +896,12 @@ impl Broker {
 
     fn lease_check(&self, resource: &str) -> Value {
         let resource = resource.trim();
-        let lease = self.leases.get(resource).map(|l| LeaseInfo {
-            resource: resource.to_string(),
-            holder: l.holder.clone(),
-            expires_at_ms: l.expires_at_ms,
-        });
+        let lease = self.leases.get(resource).map(|l| l.info(resource));
         to_value(&LeaseCheckOk { resource: resource.to_string(), lease })
     }
 
     fn leases_of(&self, agent: &str) -> Vec<LeaseInfo> {
-        self.leases
-            .iter()
-            .filter(|(_, l)| l.holder == agent)
-            .map(|(r, l)| LeaseInfo { resource: r.clone(), holder: l.holder.clone(), expires_at_ms: l.expires_at_ms })
-            .collect()
+        self.leases.iter().filter(|(_, l)| l.holder == agent).map(|(r, l)| l.info(r)).collect()
     }
 
     fn requests(&self, pred: impl Fn(&Open) -> bool) -> Vec<RequestSummary> {
@@ -967,11 +964,7 @@ impl Broker {
                 })
             }
         };
-        let leases = self
-            .leases
-            .iter()
-            .map(|(r, l)| LeaseInfo { resource: r.clone(), holder: l.holder.clone(), expires_at_ms: l.expires_at_ms })
-            .collect();
+        let leases = self.leases.iter().map(|(r, l)| l.info(r)).collect();
         Ok(to_value(&StatusOk {
             protocol: PROTOCOL.to_string(),
             lc: self.lc,
