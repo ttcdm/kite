@@ -3,12 +3,12 @@
 //! there is no shared mutable state and no lock to get wrong; the order in
 //! which commands reach the channel is the order in which they take effect.
 
-use crate::board::{Applied, Board};
+use crate::board::{Applied, Board, GitOut};
 use crate::ledger::{Ledger, now_ms};
 use crate::restore::{OpenRequest, Restored};
 use crate::vcs::{Git, Vcs};
 use crate::waits::WaitGraph;
-use kite_proto::board::{CARD_SCHEMA, CardOp};
+use kite_proto::board::{CARD_SCHEMA, Card, CardOp};
 use kite_proto::config::BROKER_AGENT;
 use kite_proto::schema::{CANCEL_SCHEMA, ERROR_SCHEMA};
 use kite_proto::wire::*;
@@ -229,7 +229,9 @@ pub struct Broker {
     log: Vec<Value>,
     board: Board,
     /// Git for the project root, used by card moves that create worktrees or check merges.
-    vcs: Box<dyn Vcs + Send>,
+    vcs: Arc<dyn Vcs>,
+    /// Finished git jobs come back here, to be applied in order with everything else.
+    git_tx: mpsc::UnboundedSender<GitDone>,
 }
 
 fn err<T>(code: ErrorCode, message: impl Into<String>) -> KiteResult<T> {
@@ -244,6 +246,15 @@ fn to_value<T: serde::Serialize>(v: &T) -> Value {
 /// change while the broker runs); this answers instead of panicking if not.
 fn no_slot(agent: &str) -> KiteError {
     KiteError::new(ErrorCode::Internal, format!("no mailbox for {agent}"))
+}
+
+/// A card move's git work, finished on a blocking thread.
+struct GitDone {
+    card_id: String,
+    by: String,
+    conn: ConnId,
+    result: KiteResult<GitOut>,
+    reply: Option<oneshot::Sender<Reply>>,
 }
 
 fn is_answer_to(e: &Envelope, rid: Ulid) -> bool {
@@ -298,7 +309,19 @@ impl Broker {
     /// Starts the broker task. The task ends on `shutdown`, or with an error
     /// when the ledger cannot be written: the broker stops rather than run unaudited.
     pub fn spawn(config: Arc<Config>, ledger: Ledger) -> (BrokerHandle, JoinHandle<io::Result<()>>) {
+        let timeout = Duration::from_millis(config.board.git_timeout_ms);
+        let vcs: Arc<dyn Vcs> = Arc::new(Git::new(config.root.clone(), timeout));
+        Broker::spawn_with_vcs(config, ledger, vcs)
+    }
+
+    /// Like `spawn`, with the version control the board uses (tests pass a fake).
+    pub fn spawn_with_vcs(
+        config: Arc<Config>,
+        ledger: Ledger,
+        vcs: Arc<dyn Vcs>,
+    ) -> (BrokerHandle, JoinHandle<io::Result<()>>) {
         let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
+        let (git_tx, git_rx) = mpsc::unbounded_channel();
         let slots = config.agents.keys().map(|a| (a.clone(), Slot::default())).collect();
         // Messages, open requests and the board are rebuilt from the ledger.
         let events = crate::ledger::read_events(ledger.path()).unwrap_or_default();
@@ -306,7 +329,6 @@ impl Broker {
         let cards = crate::board::replay(events);
         let board =
             Board::new(config.board.clone(), config.agents.keys().cloned().collect(), config.root.clone(), cards);
-        let vcs = Box::new(Git::new(config.root.clone()));
         let broker = Broker {
             config,
             ledger,
@@ -324,12 +346,22 @@ impl Broker {
             log: Vec::new(),
             board,
             vcs,
+            git_tx,
         };
-        let task = tokio::spawn(broker.run(rx, restored));
+        let task = tokio::spawn(broker.run(rx, git_rx, restored));
         (BrokerHandle { tx, next_conn: Arc::new(AtomicU64::new(0)) }, task)
     }
 
-    async fn run(mut self, mut rx: mpsc::Receiver<Cmd>, restored: Restored) -> io::Result<()> {
+    async fn run(
+        mut self,
+        mut rx: mpsc::Receiver<Cmd>,
+        mut git_rx: mpsc::UnboundedReceiver<GitDone>,
+        restored: Restored,
+    ) -> io::Result<()> {
+        // Asking git whether this is a repository runs a process: do it once, off this task.
+        let vcs = self.vcs.clone();
+        let is_repo = tokio::task::spawn_blocking(move || vcs.is_repo()).await.unwrap_or(false);
+        self.board.set_repo(is_repo);
         self.log(json!({
             "type": "started",
             "protocol": PROTOCOL,
@@ -355,6 +387,7 @@ impl Broker {
                     Some(Cmd::Process { agent, status }) => self.set_process(agent, status),
                     Some(Cmd::Shutdown { done }) => { stop = Some(done); break; }
                 },
+                Some(done) = git_rx.recv() => self.git_done(done),
                 _ = sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => self.fire_timers(),
             }
             self.flush_log().await?;
@@ -503,7 +536,10 @@ impl Broker {
         let result = match (agent.as_deref(), op) {
             (_, Op::Status { agent }) => Some(self.status(agent.as_deref())),
             (_, Op::LeaseCheck { resource }) => Some(Ok(self.lease_check(&resource))),
-            (by, Op::Card { card }) if card.is_read_only() => Some(self.card_op(by.unwrap_or_default(), card)),
+            (by, Op::Card { card }) if card.is_read_only() => {
+                let by = by.unwrap_or_default().to_string();
+                self.card_op(&by, card, conn, &mut reply)
+            }
             (None, Op::Register { agent, protocol }) => Some(self.register(conn, &agent, &protocol)),
             (Some(_), Op::Register { .. }) => {
                 Some(err(ErrorCode::AlreadyRegistered, "this connection already registered an agent"))
@@ -511,7 +547,7 @@ impl Broker {
             (None, _) => Some(err(ErrorCode::NotRegistered, "register before using this operation")),
             (Some(me), op) => {
                 let me = me.to_string();
-                self.agent_op(&me, op, &mut reply)
+                self.agent_op(&me, conn, op, &mut reply)
             }
         };
         // `None` means the operation took the reply: answered from a waiter or parked.
@@ -531,7 +567,13 @@ impl Broker {
         }
     }
 
-    fn agent_op(&mut self, me: &str, op: Op, reply: &mut Option<oneshot::Sender<Reply>>) -> Option<KiteResult<Value>> {
+    fn agent_op(
+        &mut self,
+        me: &str,
+        conn: ConnId,
+        op: Op,
+        reply: &mut Option<oneshot::Sender<Reply>>,
+    ) -> Option<KiteResult<Value>> {
         match op {
             Op::Send { draft } => Some(self.send(me, draft)),
             Op::Recv { wait_ms, max } => self.recv(me, wait_ms, max, reply),
@@ -542,7 +584,7 @@ impl Broker {
             Op::Lease { resource, ttl_ms } => Some(self.lease(me, resource, ttl_ms)),
             Op::Release { resource } => Some(self.release(me, &resource)),
             Op::Contracts => Some(Ok(self.contracts(me))),
-            Op::Card { card } => Some(self.card_op(me, card)),
+            Op::Card { card } => self.card_op(me, card, conn, reply),
             Op::Register { .. } | Op::Status { .. } | Op::LeaseCheck { .. } => {
                 unreachable!("handled before agent_op")
             }
@@ -1038,20 +1080,65 @@ impl Broker {
 
     /// Applies a card operation; a change is recorded as a full card snapshot
     /// (which is what the board is rebuilt from) and announced to the agents it concerns.
-    fn card_op(&mut self, by: &str, op: CardOp) -> KiteResult<Value> {
-        match self.board.apply(by, op, now_ms(), self.vcs.as_ref())? {
-            Applied::Read(v) => Ok(v),
-            Applied::Changed { card, action, notify } => {
-                self.log(json!({ "type": "card", "action": action, "by": by, "card": card }));
-                for agent in notify {
-                    let payload = json!({
-                        "card_id": card.id, "action": action, "by": by,
-                        "state": card.state.as_str(), "title": card.title,
-                    });
-                    self.broker_message(&agent, Kind::Event, CARD_SCHEMA, None, payload);
-                }
-                Ok(to_value(&*card))
+    /// `None` means the reply was taken: the move is waiting on git.
+    fn card_op(
+        &mut self,
+        by: &str,
+        op: CardOp,
+        conn: ConnId,
+        reply: &mut Option<oneshot::Sender<Reply>>,
+    ) -> Option<KiteResult<Value>> {
+        let applied = match self.board.apply(by, op, now_ms()) {
+            Ok(a) => a,
+            Err(e) => return Some(Err(e)),
+        };
+        match applied {
+            Applied::Read(v) => Some(Ok(v)),
+            Applied::Changed { card, action, notify } => Some(Ok(self.card_changed(by, &card, action, notify))),
+            Applied::NeedsGit { card_id, job } => {
+                let reply = reply.take();
+                let (vcs, tx, by) = (self.vcs.clone(), self.git_tx.clone(), by.to_string());
+                tokio::task::spawn_blocking(move || {
+                    let result = job.run(vcs.as_ref());
+                    let _ = tx.send(GitDone { card_id, by, conn, result, reply });
+                });
+                None
             }
+        }
+    }
+
+    /// Records a card change (a full snapshot, which is what the board is rebuilt
+    /// from) and tells the agents it concerns.
+    fn card_changed(&mut self, by: &str, card: &Card, action: &str, notify: BTreeSet<String>) -> Value {
+        self.log(json!({ "type": "card", "action": action, "by": by, "card": card }));
+        for agent in notify {
+            let payload = json!({
+                "card_id": card.id, "action": action, "by": by,
+                "state": card.state.as_str(), "title": card.title,
+            });
+            self.broker_message(&agent, Kind::Event, CARD_SCHEMA, None, payload);
+        }
+        to_value(card)
+    }
+
+    /// Completes a card move once its git work is done. A requester that went away
+    /// still gets the move committed if git succeeded: the repository already changed.
+    fn git_done(&mut self, done: GitDone) {
+        let result = match self.board.finish(&done.card_id, done.result) {
+            Ok(Applied::Changed { card, action, notify }) => Ok(self.card_changed(&done.by, &card, action, notify)),
+            Ok(_) => Err(KiteError::new(ErrorCode::Internal, "a git move finished without a change")),
+            Err(e) => {
+                tracing::info!(agent = done.by, card = done.card_id, code = %e.code, "refused");
+                self.log(json!({
+                    "type": "refused", "conn": done.conn, "agent": done.by, "op": "card",
+                    "code": e.code, "message": e.message,
+                }));
+                Err(e)
+            }
+        };
+        if let Some(reply) = done.reply {
+            let inbox = self.inbox_of(done.conn);
+            let _ = reply.send(Reply { result, inbox });
         }
     }
 

@@ -2,6 +2,7 @@
 //! worktree or branch, and merging needs a commit on the mainline.
 
 use kite_core::broker::{BrokerHandle, ConnId, Reply};
+use kite_core::vcs::Vcs;
 use kite_core::{Broker, Ledger};
 use kite_proto::board::*;
 use kite_proto::wire::*;
@@ -49,14 +50,22 @@ struct Env {
 }
 
 fn start() -> Env {
+    start_with("", None)
+}
+
+/// A git project with `extra` appended to [board] and, if given, a stand-in for git.
+fn start_with(extra: &str, vcs: Option<Arc<dyn Vcs>>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     git(&root, &["init", "-q", "-b", "main"]);
     std::fs::write(root.join(".gitignore"), ".kite/\nwt/\n").unwrap();
     commit(&root, "README");
-    let config = Arc::new(Config::parse(CONFIG, &root).unwrap());
+    let config = Arc::new(Config::parse(&format!("{CONFIG}{extra}"), &root).unwrap());
     let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync).unwrap();
-    let (h, _task) = Broker::spawn(config, ledger);
+    let (h, _task) = match vcs {
+        Some(v) => Broker::spawn_with_vcs(config, ledger, v),
+        None => Broker::spawn(config, ledger),
+    };
     Env { h, root, _dir: dir }
 }
 
@@ -181,4 +190,71 @@ async fn merging_needs_a_commit_reachable_from_the_mainline() {
     git(&e.root, &["merge", "-q", "--ff-only", "feat/a"]);
     let c = card_of(e.card(lead, mv("a", CardState::Merged, Some("feat/a"))).await);
     assert_eq!((c.state, c.merge_ref), (CardState::Merged, Some(work)));
+}
+
+/// Git that blocks every checkout until the test lets it go.
+struct HeldGit {
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Vcs for HeldGit {
+    fn is_repo(&self) -> bool {
+        true
+    }
+    fn checkout_worktree(&self, _: &Path, _: &str) -> Result<(), String> {
+        self.release.lock().unwrap().recv().map_err(|_| "released without a go".to_string())
+    }
+    fn ensure_branch(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn resolve_commit(&self, rev: &str) -> Result<String, String> {
+        Ok(rev.to_string())
+    }
+    fn reachable_from(&self, _: &str, _: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn a_slow_git_holds_only_its_own_card() {
+    let (go, release) = std::sync::mpsc::channel();
+    let e = start_with("", Some(Arc::new(HeldGit { release: std::sync::Mutex::new(release) })));
+    let lead = e.agent("lead").await;
+    let coder = e.agent("coder").await;
+    e.ready(lead, "slow", Some("feat/slow"), Some("wt/slow")).await;
+    e.ready(lead, "other", Some("feat/other"), None).await;
+
+    let start = e.h.submit(coder, Op::Card { card: mv("slow", CardState::Running, None) }).await;
+    // The broker keeps serving while git is stuck ...
+    let status: StatusOk =
+        serde_json::from_value(e.h.call(lead, Op::Status { agent: None }).await.result.unwrap()).unwrap();
+    assert_eq!(status.agents.len(), 3);
+    let title = CardPatch { title: Some("other, renamed".into()), ..Default::default() };
+    e.card(lead, CardOp::Update { id: "other".into(), patch: title }).await.result.unwrap();
+    // ... and only the card waiting on git is held.
+    let held = CardPatch { title: Some("renamed".into()), ..Default::default() };
+    let busy = e.card(lead, CardOp::Update { id: "slow".into(), patch: held }).await.result.unwrap_err();
+    assert_eq!(busy.code, ErrorCode::Busy);
+
+    go.send(()).unwrap();
+    let started = card_of(start.await.unwrap());
+    assert_eq!(started.state, CardState::Running);
+}
+
+#[tokio::test]
+async fn a_hung_git_hook_is_killed_and_the_start_refused() {
+    let e = start_with("git_timeout_ms = 300\n", None);
+    let hook = e.root.join(".git/hooks/post-checkout");
+    std::fs::write(&hook, "#!/bin/sh\nsleep 60\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let lead = e.agent("lead").await;
+    let coder = e.agent("coder").await;
+    e.ready(lead, "hung", Some("feat/hung"), Some("wt/hung")).await;
+    let why = refused(e.card(coder, mv("hung", CardState::Running, None)).await);
+    assert!(why.contains("timed out") && why.contains("git worktree prune"), "{why}");
+    let card = card_of(e.card(lead, CardOp::Get { id: "hung".into() }).await);
+    assert_eq!(card.state, CardState::Ready, "a refused start leaves the card ready");
 }

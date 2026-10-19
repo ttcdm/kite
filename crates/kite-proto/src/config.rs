@@ -110,6 +110,9 @@ pub struct BoardSettings {
     /// In a git project, a merged card's `merge_ref` must be a commit reachable from this ref.
     #[serde(default = "d_mainline")]
     pub mainline: String,
+    /// Longest any single git command may run (hooks included) before it is killed.
+    #[serde(default = "d_git_timeout")]
+    pub git_timeout_ms: u64,
 }
 
 fn d_gates() -> Vec<String> {
@@ -121,6 +124,9 @@ fn d_true() -> bool {
 fn d_mainline() -> String {
     "main".into()
 }
+fn d_git_timeout() -> u64 {
+    30_000
+}
 
 impl Default for BoardSettings {
     fn default() -> Self {
@@ -129,6 +135,7 @@ impl Default for BoardSettings {
             default_gates: d_gates(),
             independent_review: true,
             mainline: d_mainline(),
+            git_timeout_ms: d_git_timeout(),
         }
     }
 }

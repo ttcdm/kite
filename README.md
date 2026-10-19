@@ -82,6 +82,7 @@ managers = ["lead"]                        # empty: every agent may manage
 default_gates = ["tests", "diff_review", "risk"]
 independent_review = true
 mainline = "main"                          # merge_ref must be on this ref (git projects only)
+git_timeout_ms = 30000                     # longest a git command (and its hooks) may run
 ```
 
 Card changes are written to the ledger as full snapshots, and `kite up` rebuilds the board
@@ -104,8 +105,10 @@ There the broker creates branches and worktrees when cards start and checks `mer
 `mainline` when they merge. In any other project it checks only that the handoff file exists, and
 `merge_ref` is kept as written (a PR link is fine). The broker does not check that the commit
 in `merge_ref` contains the card's branch, does not remove worktrees when a card merges or is
-archived, and does not re-check the branch when a card is reopened or unblocked. Git runs on
-the broker task, so a slow checkout holds up other messages until it finishes.
+archived, and does not re-check the branch when a card is reopened or unblocked. Git work runs
+off the broker's event loop: while it does, only that card waits (other changes to it answer
+`busy`). Each git command, hooks included, is killed after `git_timeout_ms` (default 30000) and
+the move is refused; if a worktree was left half made, `git worktree prune` cleans it up.
 
 ## Seeing what each agent is doing
 

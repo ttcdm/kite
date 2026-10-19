@@ -1,15 +1,21 @@
-//! What the board asks of version control. The broker passes a [`Git`] for the
-//! project root into every card operation; the board's unit tests pass a fake.
-//! Git runs on the broker task, so a slow checkout delays other messages until
-//! it finishes.
+//! What the board asks of version control. The broker runs these calls on a
+//! blocking worker thread, never on its own task, so a slow checkout delays only
+//! the card waiting for it. The board's unit tests use a fake.
+//!
+//! Each git command runs in its own process group with a deadline: on expiry
+//! the whole group is killed, hooks included.
 
+use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Longest git error kept in a refusal message.
 const MAX_GIT_ERROR: usize = 500;
 
-pub trait Vcs {
+pub trait Vcs: Send + Sync {
     /// Whether the project root is inside a git work tree. When it is not,
     /// the board checks nothing in git.
     fn is_repo(&self) -> bool;
@@ -28,6 +34,7 @@ pub trait Vcs {
 /// The `git` command line, run in the project root.
 pub struct Git {
     root: PathBuf,
+    timeout: Duration,
 }
 
 enum Fail {
@@ -61,13 +68,32 @@ fn not_an_option(what: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn drain(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        buf
+    })
+}
+
+/// Kills every process in the group led by `pid`.
+fn kill_group(pid: u32) {
+    if let Ok(pid) = i32::try_from(pid)
+        && pid > 1
+    {
+        // SAFETY: kill(2) takes plain integers; a negative pid addresses the process group.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+}
+
 impl Git {
-    pub fn new(root: PathBuf) -> Git {
-        Git { root }
+    /// `timeout` bounds each git command, including any hooks it runs.
+    pub fn new(root: PathBuf, timeout: Duration) -> Git {
+        Git { root, timeout }
     }
 
     fn run(&self, dir: &Path, args: &[&str]) -> Result<String, Fail> {
-        let out = Command::new("git")
+        let mut child = Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -79,14 +105,58 @@ impl Git {
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
             .map_err(|e| Fail::Spawn(format!("cannot run git: {e}")))?;
-        if out.status.success() {
-            return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        let pid = child.id();
+        let out = drain(child.stdout.take().expect("stdout is piped"));
+        let err = drain(child.stderr.take().expect("stderr is piped"));
+        let deadline = Instant::now() + self.timeout;
+        let timed_out = || {
+            let what = args.join(" ");
+            Fail::Exit(
+                None,
+                format!(
+                    "git {what} timed out after {} ms; if a worktree was left half made, run `git worktree prune`",
+                    self.timeout.as_millis()
+                ),
+            )
+        };
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() >= deadline => {
+                    kill_group(pid);
+                    let _ = child.wait();
+                    let _ = (out.join(), err.join());
+                    return Err(timed_out());
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                Err(e) => {
+                    kill_group(pid);
+                    return Err(Fail::Spawn(format!("cannot wait for git: {e}")));
+                }
+            }
+        };
+        // git is done, but a hook it ran may still hold the pipes open: give the
+        // readers until the deadline, then end the group so they can finish.
+        while !(out.is_finished() && err.is_finished()) {
+            if Instant::now() >= deadline {
+                kill_group(pid);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = out.join().unwrap_or_default();
+        let stderr = err.join().unwrap_or_default();
+        if status.success() {
+            return Ok(String::from_utf8_lossy(&stdout).trim().to_string());
+        }
+        let stderr = String::from_utf8_lossy(&stderr);
         let why = if stderr.trim().is_empty() { "failed".to_string() } else { clip(&stderr) };
-        Err(Fail::Exit(out.status.code(), format!("git {}: {why}", args.join(" "))))
+        Err(Fail::Exit(status.code(), format!("git {}: {why}", args.join(" "))))
     }
 
     fn git(&self, args: &[&str]) -> Result<String, String> {

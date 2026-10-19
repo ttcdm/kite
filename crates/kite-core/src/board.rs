@@ -38,6 +38,79 @@ pub enum Applied {
         /// Agents to send `kite.card@1` to.
         notify: BTreeSet<String>,
     },
+    /// The move passed every other check and now needs git. Run `job` off the
+    /// broker task and pass its result to [`Board::finish`]; until then the card
+    /// answers `busy`.
+    NeedsGit {
+        card_id: String,
+        job: GitJob,
+    },
+}
+
+/// The git work a move waits on.
+#[derive(Debug, Clone)]
+pub enum GitJob {
+    /// ready -> running with a worktree: add or switch it to the card's branch.
+    Checkout { dir: PathBuf, worktree: String, branch: String },
+    /// ready -> running with only a branch: create it if it does not exist.
+    EnsureBranch { branch: String },
+    /// review -> merged: `rev` must name a commit reachable from `mainline`.
+    MergeCheck { rev: String, mainline: String },
+}
+
+pub enum GitOut {
+    Done,
+    /// The full id of the merged commit.
+    Commit(String),
+}
+
+impl GitJob {
+    fn refuse(&self, what: String) -> KiteError {
+        let label = match self {
+            GitJob::MergeCheck { .. } => "review -> merged",
+            _ => "ready -> running",
+        };
+        refuse(ErrorCode::TransitionRefused, format!("{label}: {what}"))
+    }
+
+    /// Runs the git steps; blocks, so call it from a blocking thread.
+    pub fn run(&self, vcs: &dyn Vcs) -> KiteResult<GitOut> {
+        match self {
+            GitJob::Checkout { dir, worktree, branch } => {
+                vcs.checkout_worktree(dir, branch).map(|()| GitOut::Done).map_err(|e| {
+                    self.refuse(format!("cannot set up worktree {worktree} on branch {branch}: {e}"))
+                        .with_detail(json!({ "git": e }))
+                })
+            }
+            GitJob::EnsureBranch { branch } => vcs.ensure_branch(branch).map(|()| GitOut::Done).map_err(|e| {
+                self.refuse(format!("cannot create branch {branch}: {e}")).with_detail(json!({ "git": e }))
+            }),
+            GitJob::MergeCheck { rev, mainline } => {
+                let full = vcs
+                    .resolve_commit(rev)
+                    .map_err(|e| self.refuse(format!("merge_ref {rev} is not a commit in this repository ({e})")))?;
+                let on = vcs
+                    .reachable_from(&full, mainline)
+                    .map_err(|e| self.refuse(format!("cannot read mainline {mainline} ({e})")))?;
+                if !on {
+                    return Err(self
+                        .refuse(format!(
+                            "merge_ref {rev} ({full}) is not reachable from {mainline}; merge it into {mainline} first"
+                        ))
+                        .with_detail(json!({ "commit": full, "mainline": mainline })));
+                }
+                Ok(GitOut::Commit(full))
+            }
+        }
+    }
+}
+
+/// A move waiting on git: the card as it will be once git succeeds.
+struct Pending {
+    card: Card,
+    action: &'static str,
+    notify: BTreeSet<String>,
+    by: String,
 }
 
 pub struct Board {
@@ -46,6 +119,9 @@ pub struct Board {
     agents: BTreeSet<String>,
     root: PathBuf,
     next: u64,
+    pending: BTreeMap<String, Pending>,
+    /// Whether the project root is a git work tree; checked once, off the broker task.
+    is_repo: bool,
 }
 
 fn refuse(code: ErrorCode, message: impl Into<String>) -> KiteError {
@@ -144,7 +220,45 @@ impl Board {
             .max()
             .unwrap_or(0)
             + 1;
-        Board { cards, settings, agents, root, next }
+        Board { cards, settings, agents, root, next, pending: BTreeMap::new(), is_repo: false }
+    }
+
+    /// Records whether the project is a git work tree (the broker checks once at start).
+    pub fn set_repo(&mut self, is_repo: bool) {
+        self.is_repo = is_repo;
+    }
+
+    fn not_pending(&self, id: &str) -> KiteResult<()> {
+        if self.pending.contains_key(id) {
+            return Err(refuse(ErrorCode::Busy, format!("card {id} is waiting on git; try again in a moment")));
+        }
+        Ok(())
+    }
+
+    /// Completes a move that waited on git: commits it, or refuses it with git's reason.
+    /// A refused move leaves the card as it was.
+    pub fn finish(&mut self, card_id: &str, result: KiteResult<GitOut>) -> KiteResult<Applied> {
+        let Some(mut p) = self.pending.remove(card_id) else {
+            return Err(refuse(ErrorCode::Internal, format!("card {card_id} was not waiting on git")));
+        };
+        if let GitOut::Commit(full) = result? {
+            p.card.merge_ref = Some(full);
+        }
+        let by = p.by.clone();
+        self.changed(p.card, p.action, p.notify, &by)
+    }
+
+    /// `apply` and, if the move needs git, the git work and `finish`, all at once.
+    #[cfg(test)]
+    pub fn apply_blocking(&mut self, by: &str, op: CardOp, now: u64, vcs: &dyn Vcs) -> KiteResult<Applied> {
+        self.is_repo = vcs.is_repo();
+        match self.apply(by, op, now)? {
+            Applied::NeedsGit { card_id, job } => {
+                let result = job.run(vcs);
+                self.finish(&card_id, result)
+            }
+            other => Ok(other),
+        }
     }
 
     pub fn cards(&self) -> impl Iterator<Item = &Card> {
@@ -189,7 +303,7 @@ impl Board {
                 && matches!(c.resume_state, Some(CardState::Running) | Some(CardState::Review)))
     }
 
-    pub fn apply(&mut self, by: &str, op: CardOp, now: u64, vcs: &dyn Vcs) -> KiteResult<Applied> {
+    pub fn apply(&mut self, by: &str, op: CardOp, now: u64) -> KiteResult<Applied> {
         match op {
             CardOp::Get { id } => Ok(Applied::Read(serde_json::to_value(self.card(&id)?).expect("cards serialize"))),
             CardOp::List { state, owner } => {
@@ -204,7 +318,7 @@ impl Board {
             CardOp::Create { card } => self.create(by, card, now),
             CardOp::Update { id, patch } => self.update(by, &id, patch, now),
             CardOp::Move { id, to, blocker, reason, merge_ref } => {
-                self.move_card(by, &id, to, blocker, reason, merge_ref, now, vcs)
+                self.move_card(by, &id, to, blocker, reason, merge_ref, now)
             }
             CardOp::Evidence { id, kind, reference, note, gate, pass } => {
                 self.evidence(by, &id, kind, reference, note, gate, pass, now)
@@ -267,6 +381,7 @@ impl Board {
     }
 
     fn update(&mut self, by: &str, id: &str, p: CardPatch, now: u64) -> KiteResult<Applied> {
+        self.not_pending(id)?;
         let mut c = self.card(id)?.clone();
         if c.state.is_terminal() {
             return Err(refuse(
@@ -352,10 +467,11 @@ impl Board {
         reason: Option<String>,
         merge_ref: Option<String>,
         now: u64,
-        vcs: &dyn Vcs,
     ) -> KiteResult<Applied> {
         use CardState::*;
+        self.not_pending(id)?;
         let mut c = self.card(id)?.clone();
+        let mut job: Option<GitJob> = None;
         let from = c.state;
         let is_owner = c.owner.as_deref() == Some(by);
         let owner_or_manager = is_owner || self.manager(by);
@@ -394,35 +510,35 @@ impl Board {
                     return Err(not_met("set a branch or worktree first".into()));
                 }
                 let here = c.worktree.clone();
-                if let Some(other) =
-                    self.cards.values().find(|o| o.id != c.id && Board::holds_worktree(o) && o.worktree == here)
-                {
+                // A card whose start is still waiting on git already holds its worktree.
+                let other = self
+                    .cards
+                    .values()
+                    .chain(self.pending.values().map(|p| &p.card))
+                    .find(|o| o.id != c.id && Board::holds_worktree(o) && o.worktree == here)
+                    .map(|o| o.id.clone());
+                if let Some(other) = other {
                     return Err(refuse(
                         ErrorCode::CardConflict,
                         format!(
-                            "card {} is already working in {}; give this card its own worktree",
-                            other.id,
+                            "card {other} is already working in {}; give this card its own worktree",
                             here.as_deref().unwrap_or("the project root")
                         ),
                     )
-                    .with_detail(json!({ "card": other.id, "worktree": here })));
+                    .with_detail(json!({ "card": other, "worktree": here })));
                 }
                 // Last, because it changes the repository: every other check has passed.
-                if vcs.is_repo() {
-                    let git =
-                        |what: String, e: String| not_met(format!("{what}: {e}")).with_detail(json!({ "git": e }));
-                    match (&c.worktree, &c.branch) {
-                        (Some(w), Some(b)) => vcs
-                            .checkout_worktree(&self.root.join(w), b)
-                            .map_err(|e| git(format!("cannot set up worktree {w} on branch {b}"), e))?,
+                if self.is_repo {
+                    job = Some(match (&c.worktree, &c.branch) {
+                        (Some(w), Some(b)) => {
+                            GitJob::Checkout { dir: self.root.join(w), worktree: w.clone(), branch: b.clone() }
+                        }
                         (Some(w), None) => {
                             return Err(not_met(format!("set a branch for worktree {w}: git needs one to add it")));
                         }
-                        (None, Some(b)) => {
-                            vcs.ensure_branch(b).map_err(|e| git(format!("cannot create branch {b}"), e))?
-                        }
+                        (None, Some(b)) => GitJob::EnsureBranch { branch: b.clone() },
                         (None, None) => return Err(not_met("set a branch or worktree first".into())),
-                    }
+                    });
                 }
                 notify.extend(self.managers_except(by));
                 "started"
@@ -465,24 +581,11 @@ impl Board {
                     return Err(not_met(format!("a gate must be passed by someone other than {owner}")));
                 }
                 let r = merge_ref.as_deref().map(|r| text("merge_ref", r)).transpose()?;
-                let Some(mut r) = r else {
+                let Some(r) = r else {
                     return Err(not_met("give merge_ref: the commit or PR it landed in".into()));
                 };
-                if vcs.is_repo() {
-                    let mainline = &self.settings.mainline;
-                    let commit = vcs
-                        .resolve_commit(&r)
-                        .map_err(|e| not_met(format!("merge_ref {r} is not a commit in this repository ({e})")))?;
-                    let on = vcs
-                        .reachable_from(&commit, mainline)
-                        .map_err(|e| not_met(format!("cannot read mainline {mainline} ({e})")))?;
-                    if !on {
-                        return Err(not_met(format!(
-                            "merge_ref {r} ({commit}) is not reachable from {mainline}; merge it into {mainline} first"
-                        ))
-                        .with_detail(json!({ "commit": commit, "mainline": mainline })));
-                    }
-                    r = commit;
+                if self.is_repo {
+                    job = Some(GitJob::MergeCheck { rev: r.clone(), mainline: self.settings.mainline.clone() });
                 }
                 c.merge_ref = Some(r);
                 notify.extend(c.owner.iter().cloned());
@@ -540,6 +643,11 @@ impl Board {
         };
         c.state = to;
         c.updated_at_ms = now;
+        if let Some(job) = job {
+            let card_id = c.id.clone();
+            self.pending.insert(card_id.clone(), Pending { card: c, action, notify, by: by.to_string() });
+            return Ok(Applied::NeedsGit { card_id, job });
+        }
         self.changed(c, action, notify, by)
     }
 
@@ -555,6 +663,7 @@ impl Board {
         pass: Option<bool>,
         now: u64,
     ) -> KiteResult<Applied> {
+        self.not_pending(id)?;
         let mut c = self.card(id)?.clone();
         if c.state.is_terminal() {
             return Err(refuse(ErrorCode::TransitionRefused, format!("card {id} is {}", c.state)));
@@ -607,7 +716,7 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     /// A project that is not a git repository: the board checks nothing in git.
     struct NoGit;
@@ -633,8 +742,8 @@ mod tests {
     /// A git repository in memory: branches, worktrees and which commits are on the mainline.
     #[derive(Default)]
     struct FakeGit {
-        branches: RefCell<BTreeSet<String>>,
-        worktrees: RefCell<BTreeMap<PathBuf, String>>,
+        branches: Mutex<BTreeSet<String>>,
+        worktrees: Mutex<BTreeMap<PathBuf, String>>,
         /// ref → commit id
         refs: BTreeMap<String, String>,
         /// (commit, rev) pairs where the commit is reachable from rev.
@@ -650,15 +759,15 @@ mod tests {
             if let Some(e) = &self.fail {
                 return Err(e.clone());
             }
-            self.branches.borrow_mut().insert(branch.to_string());
-            self.worktrees.borrow_mut().insert(dir.to_path_buf(), branch.to_string());
+            self.branches.lock().unwrap().insert(branch.to_string());
+            self.worktrees.lock().unwrap().insert(dir.to_path_buf(), branch.to_string());
             Ok(())
         }
         fn ensure_branch(&self, branch: &str) -> Result<(), String> {
             if let Some(e) = &self.fail {
                 return Err(e.clone());
             }
-            self.branches.borrow_mut().insert(branch.to_string());
+            self.branches.lock().unwrap().insert(branch.to_string());
             Ok(())
         }
         fn resolve_commit(&self, rev: &str) -> Result<String, String> {
@@ -672,7 +781,7 @@ mod tests {
 
     impl Board {
         fn act(&mut self, by: &str, op: CardOp, now: u64) -> KiteResult<Applied> {
-            self.apply(by, op, now, &NoGit)
+            self.apply_blocking(by, op, now, &NoGit)
         }
     }
 
@@ -688,6 +797,7 @@ mod tests {
             default_gates: vec!["tests".into(), "diff_review".into()],
             independent_review: true,
             mainline: "main".into(),
+            git_timeout_ms: 30_000,
         };
         let agents = ["lead", "coder", "coder2", "reviewer"].iter().map(|s| s.to_string()).collect();
         T { board: Board::new(settings, agents, dir.path().to_path_buf(), BTreeMap::new()), dir }
@@ -696,7 +806,7 @@ mod tests {
     fn changed(r: KiteResult<Applied>) -> (Card, &'static str, BTreeSet<String>) {
         match r.unwrap() {
             Applied::Changed { card, action, notify } => (*card, action, notify),
-            Applied::Read(_) => panic!("expected a change"),
+            Applied::Read(_) | Applied::NeedsGit { .. } => panic!("expected a change"),
         }
     }
 
@@ -765,6 +875,67 @@ mod tests {
         changed(b.act("coder", mv(CardState::Review), 6));
     }
 
+    /// card-001 ready for coder in worktree `wt/a` on branch `feat/a`, in a git project.
+    fn ready_in_git(t: &mut T) {
+        let b = &mut t.board;
+        b.set_repo(true);
+        let draft = CardDraft {
+            owner: Some("coder".into()),
+            worktree: Some("wt/a".into()),
+            branch: Some("feat/a".into()),
+            ..shaped("x")
+        };
+        changed(b.apply("lead", CardOp::Create { card: draft }, 1));
+        changed(b.apply("lead", mv(CardState::Ready), 2));
+    }
+
+    #[test]
+    fn a_move_waiting_on_git_holds_its_card_and_its_worktree() {
+        let mut t = setup(&[]);
+        ready_in_git(&mut t);
+        let b = &mut t.board;
+        let Applied::NeedsGit { card_id, job } = b.apply("coder", mv(CardState::Running), 3).unwrap() else {
+            panic!("starting in a git project needs git");
+        };
+        assert!(matches!(job, GitJob::Checkout { ref branch, .. } if branch == "feat/a"));
+        // The card is still ready until git finishes, and refuses other changes meanwhile.
+        assert_eq!(b.cards().next().unwrap().state, CardState::Ready);
+        let e = b.apply("lead", patch(CardPatch { title: Some("y".into()), ..Default::default() }), 4);
+        assert_eq!(code(e), ErrorCode::Busy);
+        // Its worktree is already taken.
+        let other = CardDraft {
+            id: Some("other".into()),
+            owner: Some("coder2".into()),
+            worktree: Some("wt/a".into()),
+            branch: Some("feat/b".into()),
+            ..shaped("y")
+        };
+        changed(b.apply("lead", CardOp::Create { card: other }, 5));
+        changed(b.apply("lead", mv_id("other", CardState::Ready), 6));
+        assert_eq!(code(b.apply("coder2", mv_id("other", CardState::Running), 7)), ErrorCode::CardConflict);
+
+        let (c, action, _) = changed(b.finish(&card_id, Ok(GitOut::Done)));
+        assert_eq!((c.state, action), (CardState::Running, "started"));
+        assert_eq!(code(b.finish(&card_id, Ok(GitOut::Done))), ErrorCode::Internal, "nothing left to finish");
+    }
+
+    #[test]
+    fn a_git_failure_leaves_the_card_where_it_was() {
+        let mut t = setup(&[]);
+        ready_in_git(&mut t);
+        let b = &mut t.board;
+        let Applied::NeedsGit { card_id, .. } = b.apply("coder", mv(CardState::Running), 3).unwrap() else {
+            panic!("expected git work");
+        };
+        let refused = KiteError::new(ErrorCode::TransitionRefused, "ready -> running: git timed out");
+        assert_eq!(code(b.finish(&card_id, Err(refused))), ErrorCode::TransitionRefused);
+        let c = b.cards().next().unwrap().clone();
+        assert_eq!(c.state, CardState::Ready);
+        // And it can be changed and started again.
+        changed(b.apply("lead", patch(CardPatch { title: Some("retry".into()), ..Default::default() }), 4));
+        assert!(matches!(b.apply("coder", mv(CardState::Running), 5).unwrap(), Applied::NeedsGit { .. }));
+    }
+
     #[test]
     fn a_card_needs_shaping_before_it_is_ready() {
         let mut t = setup(&["lead"]);
@@ -830,21 +1001,21 @@ mod tests {
         changed(b.act("lead", CardOp::Create { card: draft }, 1));
         changed(b.act("lead", mv(CardState::Ready), 2));
         let git = FakeGit::default();
-        let e = msg(b.apply("coder", mv(CardState::Running), 3, &git));
+        let e = msg(b.apply_blocking("coder", mv(CardState::Running), 3, &git));
         assert!(e.contains("set a branch for worktree wt/a"), "{e}");
         changed(b.act("coder", patch(CardPatch { branch: Some("feat/a".into()), ..Default::default() }), 4));
 
         // A git failure refuses the move, says why, and leaves the card ready.
         let broken = FakeGit { fail: Some("fatal: 'feat/a' is already checked out".into()), ..Default::default() };
-        let e = b.apply("coder", mv(CardState::Running), 5, &broken).err().unwrap();
+        let e = b.apply_blocking("coder", mv(CardState::Running), 5, &broken).err().unwrap();
         assert_eq!(e.code, ErrorCode::TransitionRefused);
         assert!(e.message.contains("cannot set up worktree wt/a on branch feat/a: fatal:"), "{}", e.message);
         assert!(e.detail.unwrap()["git"].as_str().unwrap().contains("already checked out"));
         assert_eq!(b.card("card-001").unwrap().state, CardState::Ready);
 
-        let (c, _, _) = changed(b.apply("coder", mv(CardState::Running), 6, &git));
+        let (c, _, _) = changed(b.apply_blocking("coder", mv(CardState::Running), 6, &git));
         assert_eq!(c.state, CardState::Running);
-        assert_eq!(git.worktrees.borrow().get(&root.join("wt/a")).map(String::as_str), Some("feat/a"));
+        assert_eq!(git.worktrees.lock().unwrap().get(&root.join("wt/a")).map(String::as_str), Some("feat/a"));
 
         // Without a worktree the branch must exist or be created.
         let draft = CardDraft {
@@ -855,11 +1026,11 @@ mod tests {
         };
         changed(b.act("lead", CardOp::Create { card: draft }, 7));
         changed(b.act("lead", mv_id("solo", CardState::Ready), 8));
-        let e = msg(b.apply("coder2", mv_id("solo", CardState::Running), 9, &broken));
+        let e = msg(b.apply_blocking("coder2", mv_id("solo", CardState::Running), 9, &broken));
         assert!(e.contains("cannot create branch feat/b"), "{e}");
-        changed(b.apply("coder2", mv_id("solo", CardState::Running), 10, &git));
-        assert!(git.branches.borrow().contains("feat/b"));
-        assert_eq!(git.worktrees.borrow().len(), 1);
+        changed(b.apply_blocking("coder2", mv_id("solo", CardState::Running), 10, &git));
+        assert!(git.branches.lock().unwrap().contains("feat/b"));
+        assert_eq!(git.worktrees.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -879,12 +1050,12 @@ mod tests {
         };
         let mut git =
             FakeGit { refs: BTreeMap::from([("feat/a".to_string(), "c1".to_string())]), ..Default::default() };
-        let e = msg(b.apply("lead", merge("nope"), 8, &git));
+        let e = msg(b.apply_blocking("lead", merge("nope"), 8, &git));
         assert!(e.contains("merge_ref nope is not a commit in this repository"), "{e}");
-        let e = msg(b.apply("lead", merge("feat/a"), 8, &git));
+        let e = msg(b.apply_blocking("lead", merge("feat/a"), 8, &git));
         assert!(e.contains("cannot read mainline main"), "{e}");
         git.refs.insert("main".into(), "m1".into());
-        let e = b.apply("lead", merge("feat/a"), 9, &git).err().unwrap();
+        let e = b.apply_blocking("lead", merge("feat/a"), 9, &git).err().unwrap();
         assert!(
             e.message.contains("feat/a (c1) is not reachable from main; merge it into main first"),
             "{}",
@@ -892,7 +1063,7 @@ mod tests {
         );
         assert_eq!(e.detail.unwrap()["commit"], "c1");
         git.reachable.insert(("c1".into(), "main".into()));
-        let (c, _, _) = changed(b.apply("lead", merge("feat/a"), 10, &git));
+        let (c, _, _) = changed(b.apply_blocking("lead", merge("feat/a"), 10, &git));
         // The resolved commit is kept, not the ref, which may move later.
         assert_eq!((c.state, c.merge_ref.as_deref()), (CardState::Merged, Some("c1")));
     }

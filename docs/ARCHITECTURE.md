@@ -56,11 +56,17 @@ the messages around them. Each change is appended to the ledger as a full card s
 start the broker reads the ledger (after its chain verifies) and keeps the last snapshot of each
 card. The ledger is therefore the board's only store, and every move is audited.
 
-`board.rs` starts no processes. Moves that touch git (starting a card, merging one) call the
-`Vcs` trait in `vcs.rs`, which the broker passes in on every card operation: `Git` runs the
-`git` command line in the project root, and the board's unit tests pass a fake. A move runs
-every other check before it asks git to change anything, so a refused move leaves the
-repository as it was. Git runs on the broker task, so a slow checkout holds up other commands.
+`board.rs` starts no processes. A move that touches git (starting a card, merging one) runs
+every other check first, then returns the git work it needs (`Applied::NeedsGit`) instead of
+doing it. The broker parks the caller's reply, runs the work on a blocking thread through the
+`Vcs` trait in `vcs.rs`, and gets the result back on a channel that its event loop reads like
+any other command; `Board::finish` then commits the move or refuses it. Meanwhile other agents'
+messages and timers carry on, the card answers `busy`, and a card waiting to start already holds
+its worktree. Nothing is logged until the move completes, so after a crash mid-git the card is
+still in its old column, and retrying is safe because adding a worktree or branch that exists is
+a no-op. `Git` runs each command in its own process group with a deadline (`[board]
+git_timeout_ms`, default 30 s) and kills the group, hooks included, when it passes. Whether the
+project is a git repository is checked once at start.
 
 ## Messages are event-sourced too
 
