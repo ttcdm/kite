@@ -11,7 +11,6 @@ kite-proto = { version = "0.1.0", path = "../kite-proto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.53.3", features = ["full"] }
-tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ulid = { version = "3.0.0", features = ["serde"] }
 
