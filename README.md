@@ -194,8 +194,11 @@ edit and prints a warning. This hook is Claude Code specific; other hosts rely o
 
 - One machine, one broker, Unix sockets only (macOS and Linux). Socket paths are limited to about
   104 bytes on macOS; set `broker.socket` to a shorter path if `kite up` says so.
-- Mailboxes live in memory. Restarting `kite up` loses queued messages and open requests; the
-  ledger keeps the record of them, but nothing replays it.
+- Mailboxes, open requests and the board are rebuilt from the ledger when `kite up` starts, so a
+  restart loses neither queued messages nor open requests. Messages handed out but not
+  acknowledged come back with `redelivered` incremented, as after a disconnect, and a deadline
+  that passed while the broker was down answers `timeout` right after start. Leases do not
+  survive a restart. Every start reads the whole ledger; nothing compacts it.
 - Identity is the agent name on a socket only the owner can open. It keeps agents apart; it is
   not a defence against another process running as the same user.
 - Leases are advisory except where a hook enforces them (the Claude Code hook above).

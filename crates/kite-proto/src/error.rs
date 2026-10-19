@@ -33,7 +33,8 @@ pub enum ErrorCode {
     Deadlock,
     /// The request's deadline passed before a response arrived.
     Timeout,
-    /// The request was redelivered too many times because its recipient kept disconnecting.
+    /// The request was redelivered too many times because its recipient kept disconnecting,
+    /// or a broker restart found its sender, recipient or schema no longer in kite.toml.
     PeerDown,
     /// The requester cancelled the request.
     Cancelled,

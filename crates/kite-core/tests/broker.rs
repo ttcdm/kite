@@ -60,7 +60,11 @@ fn start() -> Env {
 
 /// Starts a broker on an existing project directory, continuing its ledger.
 fn start_in(dir: TempDir) -> Env {
-    let config = Arc::new(Config::parse(CONFIG, dir.path()).unwrap());
+    start_with(dir, CONFIG)
+}
+
+fn start_with(dir: TempDir, config: &str) -> Env {
+    let config = Arc::new(Config::parse(config, dir.path()).unwrap());
     let ledger = Ledger::open(&config.broker.ledger, config.broker.fsync).unwrap();
     let (h, task) = Broker::spawn(config, ledger);
     Env { h, dir, task }
@@ -569,5 +573,147 @@ async fn the_board_survives_a_restart_and_tells_owners_what_changed() {
         .call(lead, card(CardOp::Create { card: CardDraft { title: "Next".into(), ..Default::default() } }))
         .await);
     assert_eq!(next.id, "card-002");
+    e.stop().await;
+}
+
+fn status_of(r: Reply) -> (StatusOk, AgentDetail) {
+    let mut s: StatusOk = ok(r);
+    let d = s.detail.take().unwrap();
+    (s, d)
+}
+
+#[tokio::test]
+async fn queued_messages_and_open_requests_survive_a_restart() {
+    let e = start();
+    let lead = e.agent("lead").await;
+    let worker = e.agent("worker").await;
+    let mut d = draft("worker", "task.do@1", json!({"goal": "build"}));
+    d.blocking = true;
+    let req: SendOk = ok(e.h.call(lead, send(d)).await);
+    let note: SendOk = ok(e.h.call(lead, send(draft("worker", "note@1", json!({"n": 1})))).await);
+    // The worker takes both and acknowledges only the note.
+    let got: RecvOk = ok(e.h.call(worker, recv(0)).await);
+    assert_eq!(got.messages.len(), 2);
+    e.h.call(worker, Op::Ack { ids: vec![note.id] }).await.result.unwrap();
+    let mut keyed = draft("worker", "note@1", json!({"n": 2}));
+    keyed.id = Some(ulid::Ulid::generate());
+    let queued: SendOk = ok(e.h.call(lead, send(keyed.clone())).await);
+    let before: StatusOk = ok(e.h.call(lead, Op::Status { agent: None }).await);
+    let (dir, _) = e.stop_keep().await;
+
+    // Restarting twice without anyone connecting changes nothing more.
+    let (dir, _) = start_in(dir).stop_keep().await;
+    let e = start_in(dir);
+    let observer = e.h.connect();
+    let (s, d) = status_of(e.h.call(observer, Op::Status { agent: Some("worker".into()) }).await);
+    assert_eq!(s.lc, before.lc);
+    assert_eq!(s.waits, vec![("lead".to_string(), "worker".to_string())]);
+    let mailbox: Vec<(ulid::Ulid, u32)> = d.mailbox.iter().map(|m| (m.id, m.redelivered)).collect();
+    assert_eq!(mailbox, vec![(req.id, 1), (queued.id, 0)]);
+    assert_eq!(d.owes.iter().map(|r| r.id).collect::<Vec<_>>(), vec![req.id]);
+
+    // The request handed out before the restart comes back once more and can be answered.
+    let worker = e.agent("worker").await;
+    let got: RecvOk = ok(e.h.call(worker, recv(0)).await);
+    let ids: Vec<(ulid::Ulid, u32)> = got.messages.iter().map(|m| (m.id, m.redelivered)).collect();
+    assert_eq!(ids, vec![(req.id, 1), (queued.id, 0)]);
+    e.h.call(worker, answer(req.id, json!({"ok": true}))).await.result.unwrap();
+
+    let lead = e.agent("lead").await;
+    let AwaitOk::Done { response } = ok(e.h.call(lead, Op::Await { request_id: req.id, wait_ms: 0 }).await) else {
+        panic!("expected the worker's answer");
+    };
+    assert_eq!((response.kind, response.correlation_id), (Kind::Response, Some(req.id)));
+    assert!(response.lc > before.lc);
+
+    // Per-pair seq and the logical clock carry on from where they were.
+    let next: SendOk = ok(e.h.call(lead, send(draft("worker", "note@1", json!({"n": 3})))).await);
+    assert_eq!((req.seq, note.seq, queued.seq, next.seq), (1, 2, 3, 4));
+    assert!(next.lc > response.lc);
+    // An idempotency key sent before the restart still delivers once.
+    let again: SendOk = ok(e.h.call(lead, send(keyed)).await);
+    assert!(again.duplicate && again.seq == queued.seq);
+    let s: StatusOk = ok(e.h.call(lead, Op::Status { agent: None }).await);
+    assert!(s.waits.is_empty());
+    let events = e.stop().await;
+    assert_eq!(events.iter().filter(|ev| ev["type"] == "restored").count(), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_that_passed_while_the_broker_was_down_answers_timeout() {
+    let e = start();
+    let lead = e.agent("lead").await;
+    let mut d = draft("worker", "task.do@1", json!({"goal": "slow"}));
+    d.timeout_ms = Some(20);
+    let sent: SendOk = ok(e.h.call(lead, send(d)).await);
+    let (dir, _) = e.stop_keep().await;
+    // The paused clock kept the first broker from timing it out; let the wall-clock deadline pass.
+    let deadline = sent.deadline_ms.unwrap();
+    while ledger::now_ms() <= deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    let e = start_in(dir);
+    let lead = e.agent("lead").await;
+    let AwaitOk::Done { response } = ok(e.h.call(lead, Op::Await { request_id: sent.id, wait_ms: 60_000 }).await)
+    else {
+        panic!("expected the timeout answer");
+    };
+    assert_eq!((response.kind, response.from.as_str()), (Kind::Error, "kite"));
+    assert_eq!(response.payload["code"], "timeout");
+    // Nobody had picked the request up, so it is withdrawn from the worker's mailbox.
+    let worker = e.agent("worker").await;
+    let got: RecvOk = ok(e.h.call(worker, recv(0)).await);
+    assert!(got.messages.is_empty());
+    let events = e.stop().await;
+    let last_start = events.iter().rposition(|ev| ev["type"] == "started").unwrap();
+    let closed = events.iter().position(|ev| ev["type"] == "closed" && ev["reason"] == "timeout").unwrap();
+    assert!(closed > last_start);
+}
+
+#[tokio::test]
+async fn a_request_lost_in_too_many_restarts_answers_peer_down() {
+    let e = start();
+    let lead = e.agent("lead").await;
+    let sent: SendOk = ok(e.h.call(lead, send(draft("worker", "task.do@1", json!({"goal": "x"})))).await);
+    let mut dir = None;
+    let mut e = Some(e);
+    // max_redeliveries = 1: the worker holds the request across two restarts.
+    for round in 0..2 {
+        let env = e.take().unwrap_or_else(|| start_in(dir.take().unwrap()));
+        let w = env.agent("worker").await;
+        let got: RecvOk = ok(env.h.call(w, recv(0)).await);
+        assert_eq!((got.messages[0].id, got.messages[0].redelivered), (sent.id, round));
+        dir = Some(env.stop_keep().await.0);
+    }
+    let e = start_in(dir.unwrap());
+    let lead = e.agent("lead").await;
+    let AwaitOk::Done { response } = ok(e.h.call(lead, Op::Await { request_id: sent.id, wait_ms: 0 }).await) else {
+        panic!("expected peer_down");
+    };
+    assert_eq!(response.payload["code"], "peer_down");
+    let worker = e.agent("worker").await;
+    let got: RecvOk = ok(e.h.call(worker, recv(0)).await);
+    assert!(got.messages.is_empty());
+    let events = e.stop().await;
+    assert!(events.iter().any(|ev| ev["type"] == "dead_lettered" && ev["id"] == sent.id.to_string()));
+}
+
+#[tokio::test]
+async fn a_request_to_an_agent_removed_from_the_config_answers_peer_down() {
+    let e = start();
+    let lead = e.agent("lead").await;
+    let sent: SendOk = ok(e.h.call(lead, send(draft("other", "task.do@1", json!({"goal": "x"})))).await);
+    let (dir, _) = e.stop_keep().await;
+
+    let without_other = CONFIG.replace("[agents.other]\n", "").replace(r#"["worker", "other"]"#, r#""worker""#);
+    let e = start_with(dir, &without_other);
+    let lead = e.agent("lead").await;
+    let AwaitOk::Done { response } = ok(e.h.call(lead, Op::Await { request_id: sent.id, wait_ms: 0 }).await) else {
+        panic!("expected peer_down");
+    };
+    assert_eq!(response.payload["code"], "peer_down");
+    let err = e.h.call(lead, Op::Cancel { request_id: sent.id }).await.result.unwrap_err();
+    assert_eq!(err.detail.unwrap()["closed"], "peer_down");
     e.stop().await;
 }

@@ -69,8 +69,9 @@ concerns the recipient.
    - **deadline**: the requester gets `kite.error@1` with code `timeout`. The recipient loses the
      request if it never received it; otherwise it gets `kite.cancel@1` with reason `timeout`.
    - **cancel** by the requester: the same, with reason `cancelled`.
-   - **peer_down**: the recipient disconnected while holding it more than `max_redeliveries`
-     times; the requester gets `peer_down`.
+   - **peer_down**: the recipient disconnected (or the broker restarted) while holding it more
+     than `max_redeliveries` times, or a restart found its sender, recipient or schema gone from
+     `kite.toml`; the requester gets `peer_down`.
 4. Answering a closed request fails with `no_such_request`. The detail says why it closed
    (`answered`, `timeout`, `cancelled`, `peer_down`) while the broker still remembers it.
 
@@ -85,12 +86,20 @@ stay until the request closes, so a reconnecting agent cannot dodge deadlock det
 
 `.kite/ledger.jsonl` holds one record per line:
 `{"n", "ts_ms", "prev", "event", "hash"}`, where `hash = sha256(prev + "\n" + json({event, n, ts_ms}))`
-and the first `prev` is 64 zeros. Event types: `started`, `stopped`, `registered`, `disconnected`,
-`accepted`, `refused`, `delivered`, `acked`, `closed`, `withdrawn`, `duplicate`,
+and the first `prev` is 64 zeros. Event types: `started`, `restored`, `stopped`, `registered`,
+`disconnected`, `accepted` (`{envelope}`, plus `blocking: true` for a blocking request), `refused`, `delivered`, `acked`, `closed`, `withdrawn`, `duplicate`,
 `deadlock_prevented`, `dead_lettered`, `lease_granted`, `lease_denied`, `lease_released`,
 `lease_expired`, `process`, `note`, and `card` (`{action, by, card}` with the full card after the
 change; the board is rebuilt from the last snapshot of each card). `kite up` refuses to start on a ledger whose chain does not
 verify.
+
+On start the broker also rebuilds every mailbox and open request from the ledger and logs
+`restored` (`{messages, requeued, open_requests, lc}`) right after `started`. Messages in flight
+when the broker stopped are requeued with `redelivered` incremented, as on a disconnect, and are
+dead-lettered past `max_redeliveries`. Deadlines that passed while it was down answer `timeout`
+at once. A request whose sender, recipient or schema is no longer in `kite.toml` is closed and
+its requester gets `peer_down`. `lc` and per-pair `seq` continue from the ledger. Leases are not
+restored.
 
 ## Error codes
 

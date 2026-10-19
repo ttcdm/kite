@@ -56,6 +56,25 @@ the messages around them. Each change is appended to the ledger as a full card s
 start the broker reads the ledger (after its chain verifies) and keeps the last snapshot of each
 card. The ledger is therefore the board's only store, and every move is audited.
 
+## Messages are event-sourced too
+
+Mailboxes and open requests are rebuilt from the ledger the same way (`restore.rs`). Replaying
+`accepted`, `delivered`, `acked`, `withdrawn`, `dead_lettered`, `closed` and `disconnected`
+gives each mailbox and what each agent had in flight. A `started` event means every connection
+of the previous run is gone, so what was in flight then goes back to the front of its mailbox
+with `redelivered` incremented, as on a disconnect; the same happens for the broker starting
+now. Open requests get their wall-clock `deadline_ms` back as a timer, so one that expired
+while the broker was down fires on the first turn of the event loop and answers `timeout`
+through the normal abort path. Blocking requests (marked `blocking` on their `accepted` event)
+restore their wait-for edges. `lc` and each pair's `seq` continue from the highest values in
+the ledger, so ordering stays monotonic across restarts.
+
+What the restore decides is logged after `started`: a `restored` summary, dead letters for
+messages now past `max_redeliveries`, and `peer_down` answers for requests whose sender,
+recipient or schema is no longer in `kite.toml`. A later replay therefore reaches the same
+state. Leases are not restored: they die with their holder's connection, and no connection
+survives a restart.
+
 ## Backpressure
 
 Every queue is bounded: the command channel, each mailbox (`mailbox_capacity`, counting messages

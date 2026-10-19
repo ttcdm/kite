@@ -6,6 +6,7 @@ pub mod board;
 pub mod broker;
 pub mod client;
 pub mod ledger;
+pub mod restore;
 pub mod runner;
 pub mod server;
 pub mod supervisor;

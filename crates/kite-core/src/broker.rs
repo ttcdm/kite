@@ -5,6 +5,7 @@
 
 use crate::board::{Applied, Board};
 use crate::ledger::{Ledger, now_ms};
+use crate::restore::{OpenRequest, Restored};
 use crate::vcs::{Git, Vcs};
 use crate::waits::WaitGraph;
 use kite_proto::board::{CARD_SCHEMA, CardOp};
@@ -287,8 +288,10 @@ impl Broker {
     pub fn spawn(config: Arc<Config>, ledger: Ledger) -> (BrokerHandle, JoinHandle<io::Result<()>>) {
         let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
         let slots = config.agents.keys().map(|a| (a.clone(), Slot::default())).collect();
-        // The board is rebuilt from the card snapshots already in the ledger.
-        let cards = crate::board::replay(crate::ledger::read_events(ledger.path()).unwrap_or_default());
+        // Messages, open requests and the board are rebuilt from the ledger.
+        let events = crate::ledger::read_events(ledger.path()).unwrap_or_default();
+        let restored = crate::restore::replay(&events);
+        let cards = crate::board::replay(events);
         let board =
             Board::new(config.board.clone(), config.agents.keys().cloned().collect(), config.root.clone(), cards);
         let vcs = Box::new(Git::new(config.root.clone()));
@@ -310,17 +313,18 @@ impl Broker {
             board,
             vcs,
         };
-        let task = tokio::spawn(broker.run(rx));
+        let task = tokio::spawn(broker.run(rx, restored));
         (BrokerHandle { tx, next_conn: Arc::new(AtomicU64::new(0)) }, task)
     }
 
-    async fn run(mut self, mut rx: mpsc::Receiver<Cmd>) -> io::Result<()> {
+    async fn run(mut self, mut rx: mpsc::Receiver<Cmd>, restored: Restored) -> io::Result<()> {
         self.log(json!({
             "type": "started",
             "protocol": PROTOCOL,
             "agents": self.slots.keys().collect::<Vec<_>>(),
             "schemas": self.config.registry.contracts().map(|c| c.schema_ref.to_string()).collect::<Vec<_>>(),
         }));
+        self.restore(restored);
         self.flush_log().await?;
         let mut stop: Option<oneshot::Sender<()>> = None;
         loop {
@@ -416,8 +420,13 @@ impl Broker {
     }
 
     /// Puts an accepted envelope in its recipient's mailbox and wakes the recipient.
-    fn deliver(&mut self, env: Envelope) {
-        self.log(json!({ "type": "accepted", "envelope": env }));
+    /// `blocking` is recorded so a restart can restore the request's wait-for edge.
+    fn deliver(&mut self, env: Envelope, blocking: bool) {
+        let mut event = json!({ "type": "accepted", "envelope": env });
+        if blocking {
+            event["blocking"] = json!(true);
+        }
+        self.log(event);
         let to = env.to.clone();
         if let Some(slot) = self.slots.get_mut(&to) {
             slot.mailbox.push_back(env);
@@ -429,7 +438,7 @@ impl Broker {
         let schema: SchemaRef = schema.parse().expect("built-in schema refs parse");
         debug_assert!(self.config.registry.validate(&schema, &payload).is_ok());
         let env = self.stamp(BROKER_AGENT, to, kind, schema, corr, payload, Ulid::generate(), None);
-        self.deliver(env);
+        self.deliver(env, false);
     }
 
     /// Hands waiting agents what they are waiting for.
@@ -645,7 +654,7 @@ impl Broker {
         if let Some(slot) = self.slots.get_mut(me) {
             slot.sent.insert(id, ok.clone());
         }
-        self.deliver(env);
+        self.deliver(env, d.blocking);
         Ok(to_value(&ok))
     }
 
@@ -770,7 +779,7 @@ impl Broker {
         }
         let env = self.stamp(me, &o.from, kind, schema, Some(rid), payload, Ulid::generate(), None);
         let id = env.id;
-        self.deliver(env);
+        self.deliver(env, false);
         Ok(json!({ "id": id, "request_id": rid }))
     }
 
@@ -1077,21 +1086,115 @@ impl Broker {
             "requeued": requeued, "leases_released": held,
         }));
         for env in dead {
-            self.log(json!({ "type": "dead_lettered", "agent": agent, "id": env.id, "redelivered": env.redelivered }));
-            if env.kind == Kind::Request
-                && let Some(o) = self.close(env.id, "peer_down")
-            {
-                self.broker_message(
-                    &o.from,
-                    Kind::Error,
-                    ERROR_SCHEMA,
-                    Some(env.id),
-                    json!({
-                        "code": ErrorCode::PeerDown.as_str(),
-                        "message": format!("{agent} disconnected {} times while holding this request", env.redelivered),
-                    }),
-                );
+            self.dead_letter(&agent, env);
+        }
+    }
+
+    /// Drops a message redelivered past `max_redeliveries`; a request ends with `peer_down`.
+    fn dead_letter(&mut self, agent: &str, env: Envelope) {
+        self.log(json!({ "type": "dead_lettered", "agent": agent, "id": env.id, "redelivered": env.redelivered }));
+        if env.kind == Kind::Request
+            && let Some(o) = self.close(env.id, "peer_down")
+        {
+            self.broker_message(
+                &o.from,
+                Kind::Error,
+                ERROR_SCHEMA,
+                Some(env.id),
+                json!({
+                    "code": ErrorCode::PeerDown.as_str(),
+                    "message": format!("{agent} disconnected {} times while holding this request", env.redelivered),
+                }),
+            );
+        }
+    }
+
+    /// Puts back what the ledger says was queued and open when the broker last
+    /// stopped. It runs right after `started` is logged, so what it decides
+    /// (dead letters, requests that can no longer be served) follows that event
+    /// and a later replay sees the same thing. Deadlines that passed while the
+    /// broker was down fire on the first turn of the event loop.
+    fn restore(&mut self, r: Restored) {
+        self.lc = r.lc;
+        self.seqs = r.seqs;
+        for (rid, reason) in r.closed {
+            if let Some(reason) = ["answered", "timeout", "cancelled", "peer_down"].into_iter().find(|k| *k == reason) {
+                self.closed.insert(rid, reason);
             }
+        }
+        for (agent, ok) in r.sent {
+            if let Some(slot) = self.slots.get_mut(&agent) {
+                slot.sent.insert(ok.id, ok);
+            }
+        }
+        let max = self.config.broker.max_redeliveries;
+        let mut dead = Vec::new();
+        let mut messages = 0;
+        for (agent, envs) in r.mailboxes {
+            // Messages for an agent no longer in kite.toml have nowhere to go.
+            let Some(slot) = self.slots.get_mut(&agent) else { continue };
+            for env in envs {
+                if env.redelivered > max {
+                    dead.push((agent.clone(), env));
+                } else {
+                    messages += 1;
+                    slot.mailbox.push_back(env);
+                }
+            }
+        }
+        let (now, wall) = (Instant::now(), now_ms());
+        let mut orphans = Vec::new();
+        for o in r.open {
+            let response = self.config.registry.get(&o.schema).and_then(|c| c.response.clone());
+            let declared = self.slots.contains_key(&o.from) && self.slots.contains_key(&o.to);
+            let Some(response) = response.filter(|_| declared) else {
+                orphans.push(o);
+                continue;
+            };
+            let deadline = now + Duration::from_millis(o.deadline_ms.saturating_sub(wall));
+            // The edges come from a state that had no cycle, so they all fit again.
+            if o.blocking {
+                let _ = self.waits.try_add(&o.from, &o.to);
+            }
+            let open = Open {
+                from: o.from,
+                to: o.to,
+                schema: o.schema,
+                response,
+                deadline,
+                deadline_ms: o.deadline_ms,
+                blocking: o.blocking,
+            };
+            self.open.insert(o.id, open);
+            self.timer(deadline, Timer::Deadline(o.id));
+        }
+        self.log(json!({
+            "type": "restored", "messages": messages, "requeued": r.requeued,
+            "open_requests": self.open.len(), "lc": self.lc,
+        }));
+        for (agent, env) in dead {
+            self.dead_letter(&agent, env);
+        }
+        for o in orphans {
+            self.orphan(o);
+        }
+    }
+
+    /// Ends a restored request that kite.toml no longer allows to be answered:
+    /// its sender, recipient or schema is gone. The requester gets `peer_down`.
+    fn orphan(&mut self, o: OpenRequest) {
+        self.closed.insert(o.id, "peer_down");
+        self.log(json!({ "type": "closed", "request_id": o.id, "reason": "peer_down" }));
+        if let Some(slot) = self.slots.get_mut(&o.to)
+            && let Some(pos) = slot.mailbox.iter().position(|e| e.id == o.id)
+        {
+            slot.mailbox.remove(pos);
+            self.log(json!({ "type": "withdrawn", "agent": o.to, "id": o.id }));
+        }
+        if self.slots.contains_key(&o.from) {
+            let message = format!("{} to {} can no longer be answered: kite.toml changed", o.schema, o.to);
+            let payload = json!({ "code": ErrorCode::PeerDown.as_str(), "message": message });
+            self.broker_message(&o.from, Kind::Error, ERROR_SCHEMA, Some(o.id), payload);
         }
     }
 
