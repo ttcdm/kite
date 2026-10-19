@@ -345,6 +345,12 @@ fn kite_exe() -> String {
 }
 
 async fn up(paths: &paths::Paths, config: kite_proto::Config, no_supervise: bool) -> anyhow::Result<()> {
+    // Take over SIGTERM and SIGINT before anything else exists, so a stop
+    // that arrives during startup still shuts down cleanly instead of
+    // killing the process mid-way.
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
     let config = Arc::new(config);
     // Claim the socket before touching the ledger: a second `kite up` on a live
     // project must fail without writing anything.
@@ -367,9 +373,8 @@ async fn up(paths: &paths::Paths, config: kite_proto::Config, no_supervise: bool
         paths.socket.display(),
         config.broker.ledger.display()
     );
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let died = tokio::select! {
-        _ = tokio::signal::ctrl_c() => None,
+        _ = int.recv() => None,
         _ = term.recv() => None,
         r = &mut broker => Some(r),
     };
