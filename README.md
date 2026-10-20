@@ -1,55 +1,190 @@
-# Kite
+<h1 align="center">🪁 Kite</h1>
 
-Kite runs a team of coding agents (Claude Code, Codex CLI, Gemini CLI, Cursor, Aider, or any
-process that can run a command) and makes every message between them go through one broker that
-checks it. An agent cannot send a message to someone it has no route to, cannot send a payload that
-breaks the contract, and cannot leave a request unanswered: the broker answers with `timeout` at the
-deadline.
+<p align="center">
+  <b>Thread rules for AI coding agents.</b><br>
+  Coding agents send every message through Kite instead of talking to each other directly,<br>
+  and Kite makes them behave like well-run threads.
+</p>
 
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-fits-together">How it works</a> ·
+  <a href="#the-task-board">Task board</a> ·
+  <a href="#reference">Reference</a> ·
+  <a href="docs/PROTOCOL.md">Protocol</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+---
+
+## Why
+
+When several coding agents (Claude Code, Codex, Gemini CLI, Cursor, or anything with a shell)
+work on one project, they run into the same problems threads do: two of them edit the same file,
+one waits on another forever, a queue keeps growing, a request is never answered. Kite applies the
+fixes we already use for threads:
+
+| Thread problem | What you'd use with pthreads | What Kite does |
+|---|---|---|
+| Shared state changed from many places | a mutex around it | one owner: all state lives in a single broker task that handles one message at a time, so there is no lock to forget |
+| A producer outruns its consumer | a bounded buffer | every agent's mailbox has a maximum size; a full one answers `busy` instead of growing |
+| Two threads waiting on each other | lock ordering, deadlock detection | a wait-for graph refuses any request that would close a cycle of waiting agents |
+| Two writers on one resource | a mutex | exclusive leases on files, released automatically if the holder dies |
+| Waiting forever | `pthread_cond_timedwait` | every request gets exactly one answer: the reply, or `timeout` at its deadline |
+| Messages arriving out of order | sequence numbers | per-sender order with `seq`, and one logical clock across everything |
+
+On top of that: typed message contracts (JSON Schema), a tamper-evident hash-chained log of
+everything that happened, per-agent tokens, and a task board where work can't move forward until
+its checks pass.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    subgraph hosts["Agent hosts"]
+        direction TB
+        cc["Claude Code"]
+        cx["Codex CLI"]
+        gm["Gemini CLI · Cursor"]
+        sh["any shell agent"]
+    end
+
+    subgraph kite["Kite (kite up)"]
+        direction TB
+        checks["Checks every message<br/>token · route · schema<br/>deadline · deadlock · mailbox room"]
+        state["Mailboxes · open requests<br/>leases · task board"]
+        checks --> state
+    end
+
+    cc -- "MCP" --> checks
+    cx -- "MCP" --> checks
+    gm -- "MCP" --> checks
+    sh -- "CLI" --> checks
+    state --> ledger[("Hash-chained<br/>ledger")]
 ```
- Claude Code    Codex CLI    Gemini CLI    shell agent      kite run (task graph)
-     │ MCP          │ MCP        │ MCP          │ CLI              │ client
- kite mcp       kite mcp     kite mcp         kite …              │
-     └──────────────┴────────────┴──── Unix socket, JSON lines ───┘
-                                 broker (kite up)
-      routes · JSON Schema contracts · bounded mailboxes · deadlines · deadlock refusal
-      leases · supervisor · hash-chained ledger
+
+Every arrow into Kite carries one typed message. Kite checks it, files it in the right mailbox,
+and records what it did in the ledger. Agents never talk to each other directly. Kite can also
+launch and restart the agents itself, and `kite run` drives a whole task graph through it.
+
+## A request, start to finish
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as lead
+    participant K as Kite
+    participant C as coder
+
+    L->>K: request "task.assign@1" to coder
+    Note over K: Is lead allowed to send this to coder?<br/>Does the payload match the schema?<br/>Is there room in coder's mailbox?<br/>Would waiting on coder cause a deadlock?
+    K-->>L: accepted (id, deadline)
+    C->>K: recv
+    K-->>C: the request
+    alt coder answers in time
+        C->>K: respond with "task.result@1"
+        Note over K: Does the answer match the response schema?
+        K-->>L: the answer
+    else the deadline passes first
+        K-->>L: error: timeout
+        K-->>C: event: cancel (stop working on it)
+    end
 ```
+
+A refused message is never delivered. The sender gets an error that says exactly what was wrong
+(the route that isn't allowed, the field that broke the schema, the cycle that would deadlock).
+
+## Deadlocks are refused before they happen
+
+```mermaid
+flowchart LR
+    lead(["lead"]) -- "waiting on" --> coder(["coder"])
+    coder -. "wants to wait on" .-> lead
+    refuse["Kite refuses coder's request:<br/>error: deadlock, cycle coder → lead → coder"]
+    coder -.- refuse
+```
+
+Kite keeps a graph of who is waiting on whom. A blocking request that would close a cycle is
+refused with the cycle in the error; the same message sent without waiting goes through.
+
+## The task board
+
+Work items (cards) live in Kite next to the messages. A card can't move until its exit criteria
+are met, and the refusal says which one is missing.
+
+```mermaid
+flowchart LR
+    B["Backlog"] -- "acceptance criteria<br/>and gates written" --> R["Ready"]
+    R -- "owner starts it in<br/>its own worktree" --> W["Running"]
+    W -- "handoff note<br/>and evidence" --> V["Review"]
+    V -- "every gate passed,<br/>one by a reviewer" --> M["Merged"]
+    V -. "sent back<br/>for rework" .-> W
+
+    subgraph any["Any time before Merged"]
+        direction LR
+        X["Blocked<br/>needs: reason, who must act, next step<br/>returns only to the column it left"]
+        A["Archived<br/>needs: a reason"]
+    end
+```
+
+In a git project, starting a card creates its worktree or branch, and merging checks that the
+`merge_ref` commit is on `main`. `kite board` shows the board with each owner's last heartbeat,
+blockers grouped by who has to act, and how close each card in review is to merging.
 
 ## Quick start
 
-Kite runs on macOS and Linux. Download a release archive (each has a `.sha256` beside it) and put
-`kite` on your `PATH`, or build it with Rust 1.89 or later:
+Kite runs on macOS and Linux. Build it with Rust 1.89 or later, or download a release archive
+(each has a `.sha256` beside it) and put `kite` on your `PATH`:
 
 ```bash
 cargo install --locked --path crates/kite-cli
 ```
 
+Create a starter team (`lead`, `coder`, `reviewer`) with its message schemas and a token for each
+agent:
+
 ```bash
 kite init
 ```
+
+Start Kite:
 
 ```bash
 kite up
 ```
 
-`kite init` writes a starter team (`lead`, `coder`, `reviewer`) to `kite.toml`, its schemas to
-`schemas/`, a token per agent to `.kite/tokens/<agent>`, and one MCP config per agent to
-`.kite/mcp/<agent>.json`. It also prints how to plug each host in. For Claude Code, for example:
+Connect each agent host. `kite connect <agent>` prints the exact config for Claude Code, Codex,
+Gemini CLI, Cursor and other MCP hosts. For Claude Code:
 
 ```bash
 claude mcp add kite --scope local -- kite mcp --agent coder --token-file .kite/tokens/coder
 ```
 
-`kite connect <agent>` prints the snippets for one agent: Claude Code, hosts with a JSON
-`mcpServers` file (Claude Code `.mcp.json`, Cursor, Gemini CLI, Windsurf, Cline), and Codex CLI's
-`config.toml`. These follow each host's documented format; check them against the version you run.
+Watch what's happening:
 
-## What "strict" means here
+```bash
+kite status
+```
+
+```bash
+kite board
+```
+
+> **Status:** v0.2, early. Every test drives Kite with scripted agents (MCP sessions, the CLI and a
+> Python agent); it has not yet been tried with real Claude Code, Codex or Gemini CLI sessions.
+> The configs `kite connect` prints follow each host's documented format; check them against the
+> version you run.
+
+---
+
+## Reference
+
+### What "strict" means
 
 | Rule | Enforced by |
 |---|---|
-| Only agents declared in `kite.toml` can connect, one live connection each | `register` |
+| Only agents declared in `kite.toml` can connect, one live connection each, each with its own token | `register` (`unauthorized` without the token) |
 | A message needs a declared route `from → to` for its schema | router (`route_denied`, with the allowed schemas) |
 | Payloads must match the schema's JSON Schema | validator (`schema_violation`, with each failing path) |
 | A schema's kind (request, response, event) is fixed | `wrong_kind` |
@@ -61,84 +196,11 @@ claude mcp add kite --scope local -- kite mcp --agent coder --token-file .kite/t
 | Resending a message id delivers it once | per-sender dedup window |
 | A message handed out but not acknowledged is redelivered if its agent disconnects, up to `max_redeliveries` | in-flight list |
 | Exclusive leases on files or any named resource; they end at their TTL or when the holder disconnects | lease table |
-| Everything accepted, refused and decided is written to a hash-chained ledger; the broker stops if it cannot write it | `.kite/ledger.jsonl` |
+| Everything accepted, refused and decided is written to a hash-chained ledger; the broker stops if it cannot write it | `.kite/ledger/` |
 
-## Agent Kanban
+### Agent tools (MCP)
 
-Work items live on a board the broker owns, next to the messages. A card has an owner, a
-branch or worktree, acceptance criteria, a merge gate in words, and an ordered list of named
-gates. The broker refuses any move whose exit criteria are not met and says which one is missing:
-
-| Move | Exit criteria |
-|---|---|
-| backlog → ready | acceptance criteria, a merge gate and at least one gate; by a manager |
-| ready → running | an owner and a branch or worktree; only the owner starts it; no other active card may use the same worktree. In a git project the broker then adds the worktree on the card's branch (`git worktree add`, creating the branch from HEAD if it does not exist, or checking it out in a worktree already there), or creates the branch if the card has no worktree; a worktree needs a branch, and a git error refuses the move with git's message |
-| running → review | the handoff file (path relative to the worktree) exists and evidence was recorded for this revision; by the owner |
-| review → merged | every gate passed in order in this revision, at least one passed by someone other than the owner (`independent_review`), and a `merge_ref`; in a git project `merge_ref` must name a commit reachable from `mainline`, and the card keeps the full commit id; by a manager |
-| review → running | starts a new revision; earlier gate results no longer count |
-| any → blocked | a blocker with reason, owner and next action; it can only return to the column it left |
-| any → archived | a reason; by a manager |
-
-```toml
-[board]
-managers = ["lead"]                        # empty: every agent may manage
-default_gates = ["tests", "diff_review", "risk"]
-independent_review = true
-mainline = "main"                          # merge_ref must be on this ref (git projects only)
-git_timeout_ms = 30000                     # longest a git command (and its hooks) may run
-```
-
-Card changes are written to the ledger as full snapshots, and `kite up` rebuilds the board
-from them, so the board survives restarts. When someone else changes a card, its owner gets a
-`kite.card@1` event; managers get one when a card starts, is handed off, is blocked or fails a
-gate.
-
-```bash
-kite board
-```
-
-`kite board` is the control pane. It shows each column with owner, last heartbeat and
-worktree, blockers grouped by owner with their next action, and merge readiness by gate for
-every card in review. `--all` lists merged and archived cards; `--watch` redraws every second.
-`kite card new|show|set|move|evidence` changes cards from a shell; agents use `kite_board`,
-`kite_card_create`, `kite_card_update`, `kite_card_move` and `kite_card_evidence`.
-
-A git project is one whose root (the directory holding `kite.toml`) is inside a git work tree.
-There the broker creates branches and worktrees when cards start and checks `merge_ref` against
-`mainline` when they merge. In any other project it checks only that the handoff file exists, and
-`merge_ref` is kept as written (a PR link is fine). The broker does not check that the commit
-in `merge_ref` contains the card's branch, does not remove worktrees when a card merges or is
-archived, and does not re-check the branch when a card is reopened or unblocked. Git work runs
-off the broker's event loop: while it does, only that card waits (other changes to it answer
-`busy`). Each git command, hooks included, is killed after `git_timeout_ms` (default 30000) and
-the move is refused; if a worktree was left half made, `git worktree prune` cleans it up.
-
-## Seeing what each agent is doing
-
-```bash
-kite status
-```
-
-```bash
-kite status coder
-```
-
-```bash
-kite status --watch
-```
-
-`kite status` prints one row per agent: connected or not, when it was last seen (its last
-operation), messages queued, messages handed out but not acknowledged, open requests it sent and
-open requests it owes, leases, active cards, and the process state if `kite up` launched it. `kite status <agent>` lists that agent's queued messages, open
-requests in both directions with deadlines, its leases, whether it is waiting in a recv, and its
-process. Agents can see the same through the `kite_status` tool.
-
-`kite trace` prints the ledger (`--agent coder` for one agent), and `kite trace --verify` checks
-its hash chain.
-
-## Agent tools (MCP)
-
-`kite mcp --agent <name>` serves these tools over stdio:
+`kite mcp --agent <name> --token-file <path>` serves these tools over stdio:
 
 | Tool | Does |
 |---|---|
@@ -156,7 +218,7 @@ its hash chain.
 Every tool result includes `inbox`, the number of messages waiting, because MCP has no way for a
 server to wake an agent. An agent learns of new mail on its next tool call or `kite_recv`.
 
-## Shell agents
+### Shell agents
 
 Anything that can run a command can take part. It needs its token, from `--token-file`,
 `KITE_TOKEN_FILE` or `KITE_TOKEN` (agents launched by `kite up` get `KITE_TOKEN` automatically):
@@ -176,28 +238,75 @@ kite send --as lead --to coder --schema task.assign@1 --payload '{"goal":"add a 
 `kite send --request` exits 0 when answered, 1 on an error answer, and 3 if still pending.
 `kite recv` acknowledges what it printed unless `--keep` is given.
 
-## Task graphs
+### Watching agents
 
-`kite run plan.toml` registers as the plan's `as` agent and sends one blocking request per task.
-Tasks whose dependencies are done run concurrently, up to `max_parallel`. `${tasks.<id>.result}`
-in a payload is replaced by that task's result. A failed task skips its dependents, and
-`fail_fast = true` cancels everything still running. See [examples/plan.toml](examples/plan.toml).
+`kite status` prints one row per agent: connected or not, when it was last seen, messages queued,
+messages handed out but not acknowledged, open requests it sent and owes, leases, active cards,
+and the process state if `kite up` launched it. `kite status <agent>` lists that agent's queued
+messages, open requests with deadlines, leases and process. `--watch` redraws every second.
+Agents can see the same through `kite_status`. `kite trace` prints the ledger (`--agent coder`
+for one agent), and `kite trace --verify` checks its hash chain.
 
-## Launching agents
+<details>
+<summary><b>Task board details</b></summary>
 
-An agent with a `command` in `kite.toml` is launched by `kite up` and restarted per `restart`
-(`never`, `on-failure`, `always`) up to `max_restarts`, with exponential backoff. `{prompt}`,
-`{agent}`, `{socket}` and `{root}` in the command are filled in. The process also gets
-`KITE_AGENT`, `KITE_SOCKET` and `KITE_ROOT` in its environment, and its output goes to
-`.kite/logs/<agent>.log`. Each agent restarts on its own (one_for_one); there is no group restart.
+| Move | Exit criteria |
+|---|---|
+| backlog → ready | acceptance criteria, a merge gate and at least one gate; by a manager |
+| ready → running | an owner and a branch or worktree; only the owner starts it; no other active card may use the same worktree. In a git project Kite then adds the worktree on the card's branch (`git worktree add`, creating the branch from HEAD if it does not exist, or checking it out in a worktree already there), or creates the branch if the card has no worktree; a worktree needs a branch, and a git error refuses the move with git's message |
+| running → review | the handoff file (path relative to the worktree) exists and evidence was recorded for this revision; by the owner |
+| review → merged | every gate passed in order in this revision, at least one passed by someone other than the owner (`independent_review`), and a `merge_ref`; in a git project `merge_ref` must name a commit reachable from `mainline`, and the card keeps the full commit id; by a manager |
+| review → running | starts a new revision; earlier gate results no longer count |
+| any → blocked | a blocker with reason, owner and next action; it can only return to the column it left |
+| any → archived | a reason; by a manager |
 
-Each launched agent leads its own process group, so stopping `kite up` also stops whatever the
-agent started (an MCP server, a shell, a test run): SIGTERM to the group, then SIGKILL after
-`stop_grace_ms` (default 5000). The group id is kept in `.kite/run/<agent>.pid`. If `kite up` is
-killed with SIGKILL, nothing can stop its agents; the next `kite up` warns about any that are still
-running (in its log and as a `stale_agent_group` ledger note) but does not kill them.
+```toml
+[board]
+managers = ["lead"]                        # empty: every agent may manage
+default_gates = ["tests", "diff_review", "risk"]
+independent_review = true
+mainline = "main"                          # merge_ref must be on this ref (git projects only)
+git_timeout_ms = 30000                     # longest a git command (and its hooks) may run
+```
 
-## Claude Code lease guard
+Card changes are written to the ledger as full snapshots, so the board survives restarts. When
+someone else changes a card, its owner gets a `kite.card@1` event; managers get one when a card
+starts, is handed off, is blocked or fails a gate. `kite board --all` also lists merged and
+archived cards; `kite card new|show|set|move|evidence` changes cards from a shell; agents use
+`kite_board` and the `kite_card_*` tools.
+
+A git project is one whose root (the directory holding `kite.toml`) is inside a git work tree.
+There Kite creates branches and worktrees when cards start and checks `merge_ref` against
+`mainline` when they merge. In any other project it checks only that the handoff file exists, and
+`merge_ref` is kept as written (a PR link is fine). Kite does not check that the commit in
+`merge_ref` contains the card's branch, does not remove worktrees when a card merges or is
+archived, and does not re-check the branch when a card is reopened or unblocked. Git work runs
+off the broker's event loop: while it does, only that card waits (other changes to it answer
+`busy`). Each git command, hooks included, is killed after `git_timeout_ms` and the move is
+refused; if a worktree was left half made, `git worktree prune` cleans it up.
+
+</details>
+
+<details>
+<summary><b>Task graphs, launching agents and the Claude Code lease guard</b></summary>
+
+**Task graphs.** `kite run plan.toml` registers as the plan's `as` agent and sends one blocking
+request per task. Tasks whose dependencies are done run concurrently, up to `max_parallel`.
+`${tasks.<id>.result}` in a payload is replaced by that task's result. A failed task skips its
+dependents, and `fail_fast = true` cancels everything still running. See
+[examples/plan.toml](examples/plan.toml).
+
+**Launching agents.** An agent with a `command` in `kite.toml` is launched by `kite up` and
+restarted per `restart` (`never`, `on-failure`, `always`) up to `max_restarts`, with exponential
+backoff. `{prompt}`, `{agent}`, `{socket}` and `{root}` in the command are filled in. The process
+gets `KITE_AGENT`, `KITE_SOCKET`, `KITE_ROOT` and `KITE_TOKEN`, and its output goes to
+`.kite/logs/<agent>.log`. Each agent restarts on its own; there is no group restart. Each
+launched agent leads its own process group, so stopping `kite up` also stops whatever the agent
+started: SIGTERM to the group, then SIGKILL after `stop_grace_ms` (default 5000). If `kite up` is
+killed with SIGKILL, nothing can stop its agents; the next `kite up` warns about any that are
+still running (in its log and as a `stale_agent_group` ledger note) but does not kill them.
+
+**Claude Code lease guard.** In `.claude/settings.json`:
 
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit",
@@ -205,11 +314,14 @@ running (in its log and as a `stale_agent_group` ledger note) but does not kill 
 ```
 
 The hook blocks an edit (exit code 2) when another agent holds the file's lease. With `--strict`
-it also blocks edits to files the agent has not leased. If the broker is unreachable it allows the
-edit and prints a warning. This hook is Claude Code specific; other hosts rely on agents calling
+it also blocks edits to files the agent has not leased. If Kite is unreachable it allows the edit
+and prints a warning. This hook is Claude Code specific; other hosts rely on agents calling
 `kite_lease`.
 
-## Operations
+</details>
+
+<details>
+<summary><b>Operations: settings, logs, running as a service, backups, upgrading, durability</b></summary>
 
 `[broker]` settings in `kite.toml`, all optional:
 
@@ -254,22 +366,36 @@ WantedBy=default.target
 On macOS, a LaunchAgent with `ProgramArguments` set to `kite` `up`, `WorkingDirectory` set to
 the project and `KeepAlive` set to `SuccessfulExit = false` does the same.
 
+**The ledger is compacted at startup.**
+
+```mermaid
+flowchart LR
+    s1["000001.jsonl<br/>(closed)"] --> s2["000002.jsonl<br/>(closed)"] --> live["000003.jsonl<br/>(live)"]
+    live -- "kite up finds it over segment_bytes" --> snap["000004.jsonl<br/>starts with one snapshot record"]
+```
+
+One hash chain runs through every segment. A start reads only the live segment; if it is too big,
+the start writes everything so far as a snapshot that begins the next segment, so starts stay fast
+however long the history. `kite trace --verify` still checks every segment.
+
 **Backups.** Everything Kite keeps is under `.kite/`: the ledger segments (copy any closed
 segment at any time; copy the live one while `kite up` is stopped), the tokens and the logs.
 `kite trace --verify` checks a restored ledger. `.kite/` holds the tokens and the whole message
 history, so keep backups private.
 
-**Upgrading.** Stop `kite up`, install the new `kite`, start it again. Read CHANGELOG.md first:
-before 1.0 a minor release can change the protocol or the ledger, and `kite up` refuses a ledger
-from a newer format rather than misreading it.
+**Upgrading.** Stop `kite up`, install the new `kite`, start it again. Read
+[CHANGELOG.md](CHANGELOG.md) first: before 1.0 a minor release can change the protocol or the
+ledger, and `kite up` refuses a ledger from a newer format rather than misreading it.
 
-**Durability.** A reply means the broker accepted the operation and queued its ledger record.
-With `fsync = "batch"` the ledger is synced whenever its queue empties, so a power cut can lose
-the last moments of activity; with `fsync = "always"` every record is synced before the next is
-written. A crash in the middle of a write leaves at most one torn final record, which the next
-start repairs and records as `recovered`.
+**Durability.** A reply means Kite accepted the operation and queued its ledger record. With
+`fsync = "batch"` the ledger is synced whenever its queue empties, so a power cut can lose the last
+moments of activity; with `fsync = "always"` every record is synced before the next is written. A
+crash in the middle of a write leaves at most one torn final record, which the next start repairs
+and records as `recovered`.
 
-## Security
+</details>
+
+### Security
 
 Each declared agent has a random 256-bit token in `.kite/tokens/<agent>` (owner-only). An agent
 registers by presenting it, so `kite send --as lead` from an agent that only knows lead's name is
@@ -283,16 +409,15 @@ token (hosts reconnect with the new one); `kite token show <agent>` prints it on
 Tokens are never written to the ledger or to logs. Set `[broker] require_tokens = false` only for
 throwaway setups. What tokens do and do not protect against is in [SECURITY.md](SECURITY.md).
 
-## Limits
+### Limits
 
-- One machine, one broker, Unix sockets only (macOS and Linux). Socket paths are limited to about
+- One machine, one Kite, Unix sockets only (macOS and Linux). Socket paths are limited to about
   104 bytes on macOS; set `broker.socket` to a shorter path if `kite up` says so.
 - Mailboxes, open requests and the board are rebuilt from the ledger when `kite up` starts, so a
   restart loses neither queued messages nor open requests. Messages handed out but not
   acknowledged come back with `redelivered` incremented, as after a disconnect, and a deadline
-  that passed while the broker was down answers `timeout` right after start. Leases do not
-  survive a restart. A start reads only the live ledger segment: when it has grown past
-  `segment_bytes`, the start compacts it into a snapshot that begins a new segment.
+  that passed while Kite was down answers `timeout` right after start. Leases do not survive a
+  restart.
 - Tokens keep agents from acting as each other by passing a name. They are files your user can
   read, so they are not a defence against a process running as you that reads them on purpose
   (see [SECURITY.md](SECURITY.md)).
@@ -306,7 +431,7 @@ throwaway setups. What tokens do and do not protect against is in [SECURITY.md](
 - Git work for a card runs on a blocking thread, one command at a time per move; a hung command
   is killed at `git_timeout_ms`.
 
-## Layout
+### Project layout and tests
 
 | Crate | Holds |
 |---|---|
@@ -329,3 +454,8 @@ cargo test -p kite-cli --test 'e2e_*'
 
 A failing end-to-end test saves its evidence (up.log, ledger, trace, board, status, agent logs)
 to `target/tmp/e2e-artifacts/<test>/`.
+
+## License
+
+MIT OR Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
