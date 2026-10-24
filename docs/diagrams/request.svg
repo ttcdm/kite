@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" width="800" height="500" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14">
+  <title>A request from start to finish</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+
+  <!-- Participants and lifelines -->
+  <g stroke="#8c959f" stroke-dasharray="4 4">
+    <line x1="120" y1="56" x2="120" y2="490"/>
+    <line x1="400" y1="56" x2="400" y2="490"/>
+    <line x1="680" y1="56" x2="680" y2="490"/>
+  </g>
+  <rect x="60" y="12" width="120" height="44" rx="8" fill="#f6f8fa" stroke="#8c959f"/>
+  <rect x="340" y="12" width="120" height="44" rx="8" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.5"/>
+  <rect x="620" y="12" width="120" height="44" rx="8" fill="#f6f8fa" stroke="#8c959f"/>
+  <g text-anchor="middle" font-weight="600" fill="#1f2328">
+    <text x="120" y="40">lead</text>
+    <text x="400" y="40" fill="#0a3069">Kite</text>
+    <text x="680" y="40">coder</text>
+  </g>
+
+  <!-- Messages (solid: sent, dashed: replies) -->
+  <g stroke="#8c959f" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+    <line x1="120" y1="92" x2="396" y2="92"/>
+    <line x1="400" y1="210" x2="124" y2="210" stroke-dasharray="6 4"/>
+    <line x1="680" y1="246" x2="404" y2="246"/>
+    <line x1="400" y1="282" x2="676" y2="282" stroke-dasharray="6 4"/>
+    <line x1="680" y1="346" x2="404" y2="346"/>
+    <line x1="400" y1="382" x2="124" y2="382" stroke-dasharray="6 4"/>
+    <line x1="400" y1="440" x2="124" y2="440" stroke-dasharray="6 4"/>
+    <line x1="400" y1="470" x2="676" y2="470" stroke-dasharray="6 4"/>
+  </g>
+  <g font-size="13" text-anchor="middle" fill="#1f2328">
+    <rect x="160" y="70" width="200" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="260" y="85">request task.assign@1 to coder</text>
+    <rect x="185" y="188" width="150" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="260" y="203">accepted (id, deadline)</text>
+    <rect x="515" y="224" width="50" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="540" y="239">recv</text>
+    <rect x="490" y="260" width="100" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="540" y="275">the request</text>
+    <rect x="455" y="324" width="170" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="540" y="339">respond: task.result@1</text>
+    <rect x="160" y="360" width="200" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="260" y="375">the answer, schema-checked</text>
+    <rect x="200" y="418" width="120" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="260" y="433">error: timeout</text>
+    <rect x="440" y="448" width="200" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="540" y="463">cancel: stop working on it</text>
+  </g>
+
+  <!-- What Kite checks before accepting -->
+  <rect x="250" y="106" width="300" height="88" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
+  <g font-size="13" text-anchor="middle" fill="#1f2328">
+    <text x="400" y="126">Is lead allowed to send this to coder?</text>
+    <text x="400" y="145">Does the payload match the schema?</text>
+    <text x="400" y="164">Is there room in coder's mailbox?</text>
+    <text x="400" y="183">Would waiting on coder cause a deadlock?</text>
+  </g>
+
+  <!-- The two ways it ends -->
+  <rect x="40" y="304" width="720" height="186" rx="8" fill="none" stroke="#8c959f"/>
+  <line x1="40" y1="400" x2="760" y2="400" stroke="#8c959f" stroke-dasharray="6 4"/>
+  <g font-size="12" fill="#1f2328">
+    <rect x="48" y="310" width="150" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="123" y="325" text-anchor="middle">coder answers in time</text>
+    <rect x="48" y="406" width="170" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="133" y="421" text-anchor="middle">or the deadline passes first</text>
+  </g>
+</svg>

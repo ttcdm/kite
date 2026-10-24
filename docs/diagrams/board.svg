@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 300" width="820" height="300" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14">
+  <title>The task board</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+
+  <!-- Columns -->
+  <g fill="#f6f8fa" stroke="#8c959f">
+    <rect x="10" y="62" width="110" height="44" rx="8"/>
+    <rect x="185" y="62" width="110" height="44" rx="8"/>
+    <rect x="360" y="62" width="110" height="44" rx="8"/>
+    <rect x="535" y="62" width="110" height="44" rx="8"/>
+  </g>
+  <rect x="705" y="62" width="105" height="44" rx="8" fill="#dafbe1" stroke="#2da44e" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#1f2328" font-weight="600">
+    <text x="65" y="89">Backlog</text>
+    <text x="240" y="89">Ready</text>
+    <text x="415" y="89">Running</text>
+    <text x="590" y="89">Review</text>
+    <text x="757" y="89" fill="#116329">Merged</text>
+  </g>
+
+  <!-- Moves, each with what it needs -->
+  <g stroke="#8c959f" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+    <line x1="120" y1="84" x2="183" y2="84"/>
+    <line x1="295" y1="84" x2="358" y2="84"/>
+    <line x1="470" y1="84" x2="533" y2="84"/>
+    <line x1="645" y1="84" x2="703" y2="84"/>
+    <path d="M590,106 C590,150 415,150 415,108" stroke-dasharray="6 4"/>
+  </g>
+  <g font-size="12" text-anchor="middle" fill="#1f2328">
+    <rect x="92" y="10" width="120" height="38" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="152" y="26">acceptance criteria</text>
+    <text x="152" y="41">and gates written</text>
+    <rect x="267" y="10" width="120" height="38" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="327" y="26">owner starts it in</text>
+    <text x="327" y="41">its own worktree</text>
+    <rect x="442" y="10" width="120" height="38" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="502" y="26">handoff note</text>
+    <text x="502" y="41">and evidence</text>
+    <rect x="612" y="10" width="124" height="38" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="674" y="26">every gate passed,</text>
+    <text x="674" y="41">one by a reviewer</text>
+    <rect x="442" y="132" width="120" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="502" y="147">sent back for rework</text>
+  </g>
+
+  <!-- Side exits -->
+  <rect x="10" y="176" width="800" height="114" rx="10" fill="none" stroke="#8c959f" stroke-dasharray="6 4"/>
+  <rect x="30" y="167" width="230" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="145" y="182" text-anchor="middle" font-size="12" fill="#1f2328">any time before Merged, a card can be</text>
+  <rect x="30" y="200" width="420" height="74" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
+  <rect x="480" y="200" width="310" height="74" rx="8" fill="#f6f8fa" stroke="#8c959f"/>
+  <g text-anchor="middle" fill="#1f2328">
+    <text x="240" y="224" font-weight="700">Blocked</text>
+    <text x="240" y="244" font-size="13">needs: a reason, who must act, the next step</text>
+    <text x="240" y="263" font-size="13">returns only to the column it left</text>
+    <text x="635" y="224" font-weight="700">Archived</text>
+    <text x="635" y="244" font-size="13">needs: a reason</text>
+    <text x="635" y="263" font-size="13">by a manager</text>
+  </g>
+</svg>

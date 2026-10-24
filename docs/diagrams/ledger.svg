@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 150" width="800" height="150" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14">
+  <title>The ledger is compacted at startup</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+  <g fill="#f6f8fa" stroke="#8c959f">
+    <rect x="10" y="50" width="130" height="54" rx="8"/>
+    <rect x="175" y="50" width="130" height="54" rx="8"/>
+  </g>
+  <rect x="340" y="50" width="130" height="54" rx="8" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.5"/>
+  <rect x="620" y="50" width="170" height="54" rx="8" fill="#dafbe1" stroke="#2da44e" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#1f2328">
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
+      <text x="75" y="73">000001.jsonl</text>
+      <text x="240" y="73">000002.jsonl</text>
+      <text x="405" y="73">000003.jsonl</text>
+      <text x="705" y="73">000004.jsonl</text>
+    </g>
+    <g font-size="12">
+      <text x="75" y="93">closed</text>
+      <text x="240" y="93">closed</text>
+      <text x="405" y="93">live</text>
+      <text x="705" y="93">begins with one snapshot</text>
+    </g>
+  </g>
+  <g stroke="#8c959f" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+    <line x1="140" y1="77" x2="173" y2="77"/>
+    <line x1="305" y1="77" x2="338" y2="77"/>
+    <line x1="470" y1="77" x2="618" y2="77"/>
+  </g>
+  <rect x="480" y="10" width="130" height="38" rx="8" fill="#ffffff" stroke="#d0d7de"/>
+  <g font-size="12" text-anchor="middle" fill="#1f2328">
+    <text x="545" y="26">kite up finds it over</text>
+    <text x="545" y="41">segment_bytes</text>
+  </g>
+  <rect x="10" y="120" width="780" height="22" rx="11" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="400" y="135" text-anchor="middle" font-size="12" fill="#1f2328">one hash chain runs through every segment · a start reads only the live one</text>
+</svg>

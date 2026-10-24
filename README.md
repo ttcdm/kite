@@ -40,29 +40,9 @@ its checks pass.
 
 ## How it fits together
 
-```mermaid
-flowchart LR
-    subgraph hosts["Agent hosts"]
-        direction TB
-        cc["Claude Code"]
-        cx["Codex CLI"]
-        gm["Gemini CLI · Cursor"]
-        sh["any shell agent"]
-    end
-
-    subgraph kite["Kite (kite up)"]
-        direction TB
-        checks["Checks every message<br/>token · route · schema<br/>deadline · deadlock · mailbox room"]
-        state["Mailboxes · open requests<br/>leases · task board"]
-        checks --> state
-    end
-
-    cc -- "MCP" --> checks
-    cx -- "MCP" --> checks
-    gm -- "MCP" --> checks
-    sh -- "CLI" --> checks
-    state --> ledger[("Hash-chained<br/>ledger")]
-```
+<p align="center">
+  <img src="docs/diagrams/overview.svg" alt="Agent hosts (Claude Code, Codex CLI, Gemini CLI, Cursor, any shell agent) send every message over MCP or the CLI to Kite, which checks it, keeps mailboxes, open requests, leases and the task board, and records everything in a hash-chained ledger" width="800">
+</p>
 
 Every arrow into Kite carries one typed message. Kite checks it, files it in the right mailbox,
 and records what it did in the ledger. Agents never talk to each other directly. Kite can also
@@ -70,40 +50,18 @@ launch and restart the agents itself, and `kite run` drives a whole task graph t
 
 ## A request, start to finish
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as lead
-    participant K as Kite
-    participant C as coder
-
-    L->>K: request "task.assign@1" to coder
-    Note over K: Is lead allowed to send this to coder?<br/>Does the payload match the schema?<br/>Is there room in coder's mailbox?<br/>Would waiting on coder cause a deadlock?
-    K-->>L: accepted (id, deadline)
-    C->>K: recv
-    K-->>C: the request
-    alt coder answers in time
-        C->>K: respond with "task.result@1"
-        Note over K: Does the answer match the response schema?
-        K-->>L: the answer
-    else the deadline passes first
-        K-->>L: error: timeout
-        K-->>C: event: cancel (stop working on it)
-    end
-```
+<p align="center">
+  <img src="docs/diagrams/request.svg" alt="Sequence: lead sends a request to coder through Kite, which checks the route, schema, mailbox room and deadlock risk; coder receives it and answers, or the deadline passes and Kite answers timeout and tells coder to stop" width="800">
+</p>
 
 A refused message is never delivered. The sender gets an error that says exactly what was wrong
 (the route that isn't allowed, the field that broke the schema, the cycle that would deadlock).
 
 ## Deadlocks are refused before they happen
 
-```mermaid
-flowchart LR
-    lead(["lead"]) -- "waiting on" --> coder(["coder"])
-    coder -. "wants to wait on" .-> lead
-    refuse["Kite refuses coder's request:<br/>error: deadlock, cycle coder → lead → coder"]
-    coder -.- refuse
-```
+<p align="center">
+  <img src="docs/diagrams/deadlock.svg" alt="lead is waiting on coder; coder asks to wait on lead; Kite refuses with a deadlock error naming the cycle coder, lead, coder" width="800">
+</p>
 
 Kite keeps a graph of who is waiting on whom. A blocking request that would close a cycle is
 refused with the cycle in the error; the same message sent without waiting goes through.
@@ -113,20 +71,9 @@ refused with the cycle in the error; the same message sent without waiting goes 
 Work items (cards) live in Kite next to the messages. A card can't move until its exit criteria
 are met, and the refusal says which one is missing.
 
-```mermaid
-flowchart LR
-    B["Backlog"] -- "acceptance criteria<br/>and gates written" --> R["Ready"]
-    R -- "owner starts it in<br/>its own worktree" --> W["Running"]
-    W -- "handoff note<br/>and evidence" --> V["Review"]
-    V -- "every gate passed,<br/>one by a reviewer" --> M["Merged"]
-    V -. "sent back<br/>for rework" .-> W
-
-    subgraph any["Any time before Merged"]
-        direction LR
-        X["Blocked<br/>needs: reason, who must act, next step<br/>returns only to the column it left"]
-        A["Archived<br/>needs: a reason"]
-    end
-```
+<p align="center">
+  <img src="docs/diagrams/board.svg" alt="Task board: Backlog, Ready, Running, Review, Merged, each move with what it needs; Review can send a card back to Running; any time before Merged a card can be Blocked or Archived" width="800">
+</p>
 
 In a git project, starting a card creates its worktree or branch, and merging checks that the
 `merge_ref` commit is on `main`. `kite board` shows the board with each owner's last heartbeat,
@@ -368,11 +315,9 @@ the project and `KeepAlive` set to `SuccessfulExit = false` does the same.
 
 **The ledger is compacted at startup.**
 
-```mermaid
-flowchart LR
-    s1["000001.jsonl<br/>(closed)"] --> s2["000002.jsonl<br/>(closed)"] --> live["000003.jsonl<br/>(live)"]
-    live -- "kite up finds it over segment_bytes" --> snap["000004.jsonl<br/>starts with one snapshot record"]
-```
+<p align="center">
+  <img src="docs/diagrams/ledger.svg" alt="Ledger segments 000001 and 000002 are closed, 000003 is live; when kite up finds it over segment_bytes it begins 000004 with one snapshot record" width="800">
+</p>
 
 One hash chain runs through every segment. A start reads only the live segment; if it is too big,
 the start writes everything so far as a snapshot that begins the next segment, so starts stay fast

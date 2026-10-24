@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14">
+  <title>How agents connect to Kite</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+
+  <!-- Agent hosts -->
+  <rect x="10" y="10" width="220" height="280" rx="12" fill="none" stroke="#8c959f" stroke-dasharray="6 4"/>
+  <rect x="55" y="1" width="130" height="22" rx="11" fill="#ffffff" stroke="#d0d7de"/>
+  <text x="120" y="17" text-anchor="middle" fill="#1f2328" font-weight="600">Agent hosts</text>
+  <g fill="#f6f8fa" stroke="#8c959f">
+    <rect x="30" y="42" width="180" height="40" rx="8"/>
+    <rect x="30" y="104" width="180" height="40" rx="8"/>
+    <rect x="30" y="166" width="180" height="40" rx="8"/>
+    <rect x="30" y="228" width="180" height="40" rx="8"/>
+  </g>
+  <g fill="#1f2328" text-anchor="middle">
+    <text x="120" y="67">Claude Code</text>
+    <text x="120" y="129">Codex CLI</text>
+    <text x="120" y="191">Gemini CLI · Cursor</text>
+    <text x="120" y="253">any shell agent</text>
+  </g>
+
+  <!-- Kite -->
+  <rect x="320" y="10" width="270" height="280" rx="12" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.5"/>
+  <text x="455" y="36" text-anchor="middle" fill="#0a3069" font-weight="700" font-size="16">Kite (kite up)</text>
+  <rect x="340" y="54" width="230" height="96" rx="8" fill="#ffffff" stroke="#54aeff"/>
+  <g fill="#1f2328" text-anchor="middle">
+    <text x="455" y="80" font-weight="600">Checks every message</text>
+    <text x="455" y="104">token · route · schema</text>
+    <text x="455" y="126">deadline · deadlock · mailbox room</text>
+  </g>
+  <line x1="455" y1="150" x2="455" y2="184" stroke="#8c959f" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="340" y="186" width="230" height="84" rx="8" fill="#ffffff" stroke="#54aeff"/>
+  <g fill="#1f2328" text-anchor="middle">
+    <text x="455" y="222">Mailboxes · open requests</text>
+    <text x="455" y="246">leases · task board</text>
+  </g>
+
+  <!-- Host arrows into the checks -->
+  <g stroke="#8c959f" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+    <path d="M210,62 C270,62 280,88 338,92"/>
+    <path d="M210,124 C270,124 280,106 338,102"/>
+    <path d="M210,186 C270,186 285,124 338,112"/>
+    <path d="M210,248 C275,248 290,136 338,122"/>
+  </g>
+  <g font-size="12" text-anchor="middle">
+    <rect x="245" y="53" width="40" height="18" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="265" y="66" fill="#1f2328">MCP</text>
+    <rect x="245" y="115" width="40" height="18" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="265" y="128" fill="#1f2328">MCP</text>
+    <rect x="245" y="177" width="40" height="18" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="265" y="190" fill="#1f2328">MCP</text>
+    <rect x="245" y="239" width="40" height="18" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="265" y="252" fill="#1f2328">CLI</text>
+  </g>
+
+  <!-- Ledger -->
+  <line x1="570" y1="228" x2="638" y2="228" stroke="#8c959f" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <g fill="#f6f8fa" stroke="#8c959f">
+    <path d="M642,196 v64 a68,12 0 0 0 136,0 v-64"/>
+    <ellipse cx="710" cy="196" rx="68" ry="12"/>
+  </g>
+  <g fill="#1f2328" text-anchor="middle">
+    <text x="710" y="232">Hash-chained</text>
+    <text x="710" y="252">ledger</text>
+  </g>
+</svg>

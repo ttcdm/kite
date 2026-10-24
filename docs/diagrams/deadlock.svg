@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 180" width="800" height="180" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14">
+  <title>A wait that would deadlock is refused</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+  </defs>
+  <rect x="30" y="66" width="150" height="48" rx="24" fill="#f6f8fa" stroke="#8c959f"/>
+  <rect x="330" y="66" width="150" height="48" rx="24" fill="#f6f8fa" stroke="#8c959f"/>
+  <g text-anchor="middle" fill="#1f2328" font-weight="600">
+    <text x="105" y="95">lead</text>
+    <text x="405" y="95">coder</text>
+  </g>
+  <path d="M180,78 C240,40 270,40 328,78" fill="none" stroke="#8c959f" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M330,102 C270,140 240,140 182,102" fill="none" stroke="#cf222e" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <g font-size="13" text-anchor="middle">
+    <rect x="205" y="36" width="100" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="255" y="51" fill="#1f2328">waiting on</text>
+    <rect x="190" y="124" width="130" height="20" rx="10" fill="#ffffff" stroke="#ff8182"/>
+    <text x="255" y="139" fill="#a40e26">wants to wait on</text>
+  </g>
+  <line x1="480" y1="90" x2="528" y2="90" stroke="#cf222e" stroke-width="1.5" stroke-dasharray="3 3"/>
+  <rect x="530" y="36" width="250" height="108" rx="10" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#1f2328">
+    <text x="655" y="66" font-weight="700" fill="#a40e26">Refused: deadlock</text>
+    <text x="655" y="92">coder's request would close</text>
+    <text x="655" y="112">the cycle</text>
+    <text x="655" y="132" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">coder → lead → coder</text>
+  </g>
+</svg>
