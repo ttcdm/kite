@@ -24,7 +24,7 @@
   <!-- Messages (solid: sent, dashed: replies) -->
   <g stroke="#8c959f" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
     <line x1="120" y1="92" x2="396" y2="92"/>
-    <line x1="400" y1="210" x2="124" y2="210" stroke-dasharray="6 4"/>
+    <line x1="400" y1="214" x2="124" y2="214" stroke-dasharray="6 4"/>
     <line x1="680" y1="246" x2="404" y2="246"/>
     <line x1="400" y1="282" x2="676" y2="282" stroke-dasharray="6 4"/>
     <line x1="680" y1="346" x2="404" y2="346"/>
@@ -35,8 +35,8 @@
   <g font-size="13" text-anchor="middle" fill="#1f2328">
     <rect x="160" y="70" width="200" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
     <text x="260" y="85">request task.assign@1 to coder</text>
-    <rect x="185" y="188" width="150" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="260" y="203">accepted (id, deadline)</text>
+    <rect x="140" y="191" width="160" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="220" y="206">accepted (id, deadline)</text>
     <rect x="515" y="224" width="50" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
     <text x="540" y="239">recv</text>
     <rect x="490" y="260" width="100" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
@@ -45,19 +45,19 @@
     <text x="540" y="339">respond: task.result@1</text>
     <rect x="160" y="360" width="200" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
     <text x="260" y="375">the answer, schema-checked</text>
-    <rect x="200" y="418" width="120" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="260" y="433">error: timeout</text>
+    <rect x="250" y="418" width="120" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="310" y="433">error: timeout</text>
     <rect x="440" y="448" width="200" height="20" rx="10" fill="#ffffff" stroke="#d0d7de"/>
     <text x="540" y="463">cancel: stop working on it</text>
   </g>
 
   <!-- What Kite checks before accepting -->
-  <rect x="250" y="106" width="300" height="88" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
+  <rect x="250" y="100" width="300" height="82" rx="8" fill="#fff8c5" stroke="#d4a72c"/>
   <g font-size="13" text-anchor="middle" fill="#1f2328">
-    <text x="400" y="126">Is lead allowed to send this to coder?</text>
-    <text x="400" y="145">Does the payload match the schema?</text>
-    <text x="400" y="164">Is there room in coder's mailbox?</text>
-    <text x="400" y="183">Would waiting on coder cause a deadlock?</text>
+    <text x="400" y="118">Is lead allowed to send this to coder?</text>
+    <text x="400" y="137">Does the payload match the schema?</text>
+    <text x="400" y="156">Is there room in coder's mailbox?</text>
+    <text x="400" y="175">Would waiting on coder cause a deadlock?</text>
   </g>
 
   <!-- The two ways it ends -->
